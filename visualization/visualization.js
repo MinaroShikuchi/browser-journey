@@ -12,6 +12,8 @@ class BrowserJourneyViz {
     this.sideMenuCollapsed = false;
     this.pinnedPaths = new Set(); // Store pinned path indices
     this.tooltip = null;
+    this.aiSession = null; // Chrome AI session
+    this.pathTitles = new Map(); // Cache for AI-generated titles
     
     this.width = window.innerWidth - 250; // Account for side menu
     this.height = window.innerHeight - 100; // Account for header and footer (reduced from 150)
@@ -27,8 +29,102 @@ class BrowserJourneyViz {
     this.setTodayDateFilter();
     this.createTooltip();
     this.loadPinnedPaths();
+    await this.initAI();
     await this.loadAndRenderGraph();
     this.updateStats();
+  }
+
+  /**
+   * Initialize Chrome Built-in AI
+   */
+  async initAI() {
+    try {
+      // Check if the AI API is available
+      if (!window.LanguageModel) {
+        console.warn('Chrome Built-in AI not available');
+        return;
+      }
+
+      // Check availability
+      const availability = await LanguageModel.availability();
+      if (availability === 'unavailable') {
+        console.warn('AI model not available');
+        return;
+      }
+
+      if (availability === 'after-download') {
+        console.log('AI model will be available after download');
+      }
+
+      // Get model parameters
+      const params = await LanguageModel.params();
+      
+      // Create AI session with slightly higher temperature for creative titles
+      this.aiSession = await LanguageModel.create({
+        temperature: Math.min(params.defaultTemperature * 1.2, params.maxTemperature),
+        topK: params.defaultTopK
+      });
+      
+      console.log('Chrome Built-in AI initialized successfully');
+    } catch (error) {
+      console.warn('Failed to initialize AI:', error);
+    }
+  }
+
+  /**
+   * Generate a descriptive title for a path using AI
+   */
+  async generatePathTitle(path) {
+    // Check if we already have a cached title
+    const pathKey = path.nodes.map(n => n.url).join('|');
+    if (this.pathTitles.has(pathKey)) {
+      return this.pathTitles.get(pathKey);
+    }
+
+    // Fallback to primary domain if AI is not available
+    if (!this.aiSession) {
+      return this.getPrimaryDomain(path);
+    }
+
+    try {
+      // Prepare context for AI
+      const pageTitles = path.nodes
+        .map(n => n.title || n.domain)
+        .filter(t => t && t.trim())
+        .slice(0, 5); // Limit to first 5 pages
+      
+      const domains = [...new Set(path.nodes.map(n => n.domain))];
+      
+      const prompt = `Create a short, descriptive title (max 4 words) for this browsing session:
+Pages visited: ${pageTitles.join(', ')}
+Domains: ${domains.join(', ')}
+
+Reply with ONLY the title, no explanation.`;
+
+      const result = await this.aiSession.prompt(prompt);
+      const title = result.trim().replace(/^["']|["']$/g, ''); // Remove quotes if present
+      
+      // Cache the result
+      this.pathTitles.set(pathKey, title);
+      
+      return title;
+    } catch (error) {
+      console.warn('AI title generation failed:', error);
+      return this.getPrimaryDomain(path);
+    }
+  }
+
+  /**
+   * Get primary domain for a path (fallback method)
+   */
+  getPrimaryDomain(path) {
+    const domainCounts = new Map();
+    path.nodes.forEach(node => {
+      const count = domainCounts.get(node.domain) || 0;
+      domainCounts.set(node.domain, count + 1);
+    });
+    return Array.from(domainCounts.entries())
+      .sort((a, b) => b[1] - a[1])[0][0];
   }
 
   /**
@@ -245,7 +341,7 @@ class BrowserJourneyViz {
   /**
    * Switch to a specific path
    */
-  switchToPath(index) {
+  async switchToPath(index) {
     if (index < 0 || index >= this.paths.length) return;
     
     this.currentPathIndex = index;
@@ -254,14 +350,19 @@ class BrowserJourneyViz {
     this.nodes = path.nodes;
     this.links = path.links;
     
+    // Generate AI title for this path (will use cache if already generated)
+    if (this.aiSession && path.nodes.length > 0) {
+      await this.generatePathTitle(path);
+    }
+    
     // Update path navigation UI
-    this.updatePathNavigation();
+    await this.updatePathNavigation();
   }
 
   /**
    * Update path navigation UI
    */
-  updatePathNavigation() {
+  async updatePathNavigation() {
     // Create or update side menu
     let sideMenu = document.getElementById('pathSideMenu');
     
@@ -301,6 +402,14 @@ class BrowserJourneyViz {
       <div id="pathItemsContainer" style="display: flex; flex-direction: column;">
     `;
     
+    // Get cached title for the active path (already generated in switchToPath)
+    let activePathTitle = null;
+    if (this.currentPathIndex >= 0 && this.currentPathIndex < this.paths.length) {
+      const path = this.paths[this.currentPathIndex];
+      const pathKey = path.nodes.map(n => n.url).join('|');
+      activePathTitle = this.pathTitles.get(pathKey);
+    }
+    
     this.paths.forEach((path, index) => {
       const isActive = index === this.currentPathIndex;
       const isPinned = this.pinnedPaths.has(index);
@@ -309,14 +418,9 @@ class BrowserJourneyViz {
       const nodeCount = path.nodes.length;
       const timeAgo = this.formatRelativeTime(firstNode.firstVisit);
       
-      // Get primary domain for this path (most visited)
-      const domainCounts = new Map();
-      path.nodes.forEach(node => {
-        const count = domainCounts.get(node.domain) || 0;
-        domainCounts.set(node.domain, count + 1);
-      });
-      const primaryDomain = Array.from(domainCounts.entries())
-        .sort((a, b) => b[1] - a[1])[0][0];
+      // Use AI-generated title only for active path, fallback to domain for others
+      const pathTitle = isActive && activePathTitle ? activePathTitle : this.getPrimaryDomain(path);
+      const primaryDomain = this.getPrimaryDomain(path); // For tooltip
       
       menuHTML += `
         <div class="path-item-wrapper" data-path-index="${index}" style="position: relative; margin-bottom: 8px; ${isPinned ? 'order: -1;' : ''}">
@@ -331,7 +435,7 @@ class BrowserJourneyViz {
           ">
             <div style="font-weight: bold; color: #E0E0E0; font-size: 13px; margin-bottom: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: flex; align-items: center; gap: 5px;" title="${this.escapeHtml(primaryDomain)}">
               ${isPinned ? '<span class="material-icons" style="font-size: 14px; color: #FFD700;">push_pin</span>' : ''}
-              ${this.escapeHtml(primaryDomain)}
+              ${this.escapeHtml(pathTitle)}
             </div>
             <div style="font-size: 11px; color: #B0B0B0; margin-bottom: 3px; display: flex; align-items: center; gap: 3px;">
               <span class="material-icons" style="font-size: 14px;">description</span> ${nodeCount} page${nodeCount > 1 ? 's' : ''}
@@ -443,11 +547,11 @@ class BrowserJourneyViz {
       });
     });
     
-    document.getElementById('showAllPaths')?.addEventListener('click', () => {
+    document.getElementById('showAllPaths')?.addEventListener('click', async () => {
       this.nodes = this.allNodes;
       this.links = this.allLinks;
       this.currentPathIndex = -1;
-      this.updatePathNavigation();
+      await this.updatePathNavigation();
       this.renderGraph();
     });
   }
@@ -878,10 +982,10 @@ class BrowserJourneyViz {
   /**
    * Search paths by domain, URL or title
    */
-  searchDomains(query) {
+  async searchDomains(query) {
     if (!query) {
       // Show all paths when search is empty
-      this.updatePathNavigation();
+      await this.updatePathNavigation();
       return;
     }
 
@@ -1098,7 +1202,7 @@ class BrowserJourneyViz {
   /**
    * Toggle pin state for a path
    */
-  togglePinPath(pathIndex) {
+  async togglePinPath(pathIndex) {
     if (this.pinnedPaths.has(pathIndex)) {
       this.pinnedPaths.delete(pathIndex);
     } else {
@@ -1109,7 +1213,7 @@ class BrowserJourneyViz {
     localStorage.setItem('pinnedPaths', JSON.stringify([...this.pinnedPaths]));
     
     // Re-render the menu to update pin state and reorder
-    this.updatePathNavigation();
+    await this.updatePathNavigation();
   }
 
   /**
