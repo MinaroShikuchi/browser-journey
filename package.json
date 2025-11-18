@@ -1,0 +1,23 @@
+{
+  "name": "browser-journey",
+  "version": "0.1.0",
+  "description": "Visualize your browsing history as an interactive network graph",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "watch": "vite build --watch"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.0.1",
+    "@types/chrome": "^0.0.258",
+    "@types/d3": "^7.4.3",
+    "svelte": "^4.2.8",
+    "vite": "^5.0.11",
+    "vite-plugin-static-copy": "^1.0.0"
+  },
+  "dependencies": {
+    "d3": "^7.8.5"
+  }
+}
