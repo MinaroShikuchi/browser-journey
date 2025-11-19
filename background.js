@@ -193,9 +193,34 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   }
 });
 
-// Listen for tab removal (cleanup tab history)
-chrome.tabs.onRemoved.addListener((tabId) => {
-  tabHistory.delete(tabId);
+// Listen for tab removal (mark journey as ended)
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  try {
+    // Get existing data
+    const result = await chrome.storage.local.get(['visits', 'closedTabs']);
+    const visits = result.visits || [];
+    const closedTabs = result.closedTabs || {};
+    
+    // Mark all visits from this tab as part of a closed journey
+    const tabVisits = visits.filter(v => v.tabId === tabId);
+    if (tabVisits.length > 0) {
+      const lastVisit = tabVisits[tabVisits.length - 1];
+      closedTabs[tabId] = {
+        closedAt: Date.now(),
+        lastUrl: lastVisit.url,
+        lastDomain: lastVisit.domain
+      };
+      
+      await chrome.storage.local.set({ closedTabs });
+      console.log('Tab closed, journey ended:', tabId);
+    }
+    
+    // Cleanup tab history
+    tabHistory.delete(tabId);
+  } catch (error) {
+    console.error('Error handling tab removal:', error);
+    tabHistory.delete(tabId);
+  }
 });
 
 

@@ -19,6 +19,8 @@
   let pinnedPaths = new Set();
   let aiSession = null;
   let pathTitles = new Map();
+  let closedTabs = {};
+  let activeTabs = new Map(); // Map of tabId -> tab info
   
   // Filter values
   let searchDomain = '';
@@ -37,6 +39,8 @@
   onMount(async () => {
     setTodayDateFilter();
     loadPinnedPaths();
+    await loadClosedTabs();
+    await loadActiveTabs();
     await initAI();
     await loadAndRenderGraph();
     updateStats();
@@ -139,6 +143,76 @@ Reply with ONLY the title, no explanation.`;
       }
     } catch (error) {
       console.error('Error loading pinned paths:', error);
+    }
+  }
+
+  async function loadClosedTabs() {
+    try {
+      const result = await chrome.storage.local.get(['closedTabs']);
+      closedTabs = result.closedTabs || {};
+    } catch (error) {
+      console.error('Error loading closed tabs:', error);
+    }
+  }
+
+  async function loadActiveTabs() {
+    try {
+      const tabs = await chrome.tabs.query({});
+      activeTabs = new Map();
+      tabs.forEach(tab => {
+        // Store by both tab ID and URL for flexible lookup
+        activeTabs.set(tab.id, {
+          id: tab.id,
+          url: tab.url,
+          title: tab.title,
+          windowId: tab.windowId
+        });
+      });
+    } catch (error) {
+      console.error('Error loading active tabs:', error);
+    }
+  }
+
+  function getPathStatus(path) {
+    // Check if ANY page in this path is currently open in a tab
+    // We check by URL since tab IDs change when tabs are closed/reopened
+    const activeTabsArray = Array.from(activeTabs.values());
+    
+    for (const node of path.nodes) {
+      const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
+      if (matchingTab) {
+        return {
+          isOpen: true,
+          isClosed: false,
+          tabId: matchingTab.id,
+          activeTab: matchingTab
+        };
+      }
+    }
+    
+    // No matching tabs found - path is closed
+    return {
+      isOpen: false,
+      isClosed: true,
+      tabId: null,
+      activeTab: null
+    };
+  }
+
+  async function continueJourney(tabId) {
+    try {
+      const tab = activeTabs.get(tabId);
+      if (tab) {
+        // Switch to the tab's window first
+        await chrome.windows.update(tab.windowId, { focused: true });
+        // Then activate the tab
+        await chrome.tabs.update(tabId, { active: true });
+      }
+    } catch (error) {
+      console.error('Error continuing journey:', error);
+      alert('Could not switch to tab. It may have been closed.');
+      // Reload active tabs to update status
+      await loadActiveTabs();
     }
   }
 
@@ -276,7 +350,7 @@ Reply with ONLY the title, no explanation.`;
       }
     });
     
-    pathList.sort((a, b) => a.nodes[0].firstVisit - b.nodes[0].firstVisit);
+    pathList.sort((a, b) => b.nodes[0].firstVisit - a.nodes[0].firstVisit);
     return pathList;
   }
 
@@ -492,6 +566,9 @@ Reply with ONLY the title, no explanation.`;
 <div class="app-container">
   <header class="header">
     <div class="header-left">
+      <button on:click={toggleSideMenu} class="btn btn-secondary" title="Toggle Side Menu">
+        <span class="material-icons">menu</span>
+      </button>
       <h1><span class="material-icons" style="vertical-align: middle;">map</span> Browser Journey</h1>
       
       <div class="header-filters">
@@ -521,17 +598,14 @@ Reply with ONLY the title, no explanation.`;
     </div>
     
     <div class="header-right">
-      <button on:click={toggleSideMenu} class="btn btn-secondary" title="Toggle Side Menu">
-        <span class="material-icons">menu</span>
-      </button>
       <button on:click={exportJSON} class="btn btn-secondary" title="Export as JSON">
-        <span class="material-icons">file_download</span> Export
+        <span class="material-icons">file_download</span>
       </button>
       <button on:click={clearHistory} class="btn btn-danger" title="Clear History">
-        <span class="material-icons">delete</span> Clear
+        <span class="material-icons">delete</span>
       </button>
       <button on:click={refresh} class="btn btn-primary" title="Refresh Graph">
-        <span class="material-icons">refresh</span> Refresh
+        <span class="material-icons">refresh</span>
       </button>
     </div>
   </header>
@@ -549,10 +623,16 @@ Reply with ONLY the title, no explanation.`;
           {#each paths as path, index}
             {@const isActive = index === currentPathIndex}
             {@const isPinned = pinnedPaths.has(index)}
+            {@const pathStatus = getPathStatus(path)}
             {@const pathKey = path.nodes.map(n => n.url).join('|')}
             {@const aiTitle = pathTitles.get(pathKey)}
             {@const displayTitle = (isActive && aiTitle) ? aiTitle : getPrimaryDomain(path)}
+            {@const isSinglePage = path.nodes.length === 1}
+            {#if !hideSinglePage || !isSinglePage}
             <div class="path-item-wrapper" class:pinned={isPinned}>
+              {#if pathStatus.isOpen}
+                <span class="status-indicator-top" title="Journey active (tab open)"></span>
+              {/if}
               <div
                 class="path-item"
                 class:active={isActive}
@@ -562,7 +642,7 @@ Reply with ONLY the title, no explanation.`;
                 tabindex="0"
               >
                 <div class="path-title">
-                  {#if isPinned}<span class="material-icons pin-icon">push_pin</span>{/if}
+                  {#if isPinned}<span class="pin-icon">📌</span>{/if}
                   {displayTitle}
                 </div>
                 <div class="path-meta">
@@ -572,13 +652,24 @@ Reply with ONLY the title, no explanation.`;
                   <span class="material-icons">schedule</span> {formatRelativeTime(path.nodes[0].firstVisit)}
                 </div>
               </div>
-              <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => togglePinPath(index)} title={isPinned ? 'Unpin' : 'Pin'}>
-                <span class="material-icons">push_pin</span>
-              </button>
-              <button class="delete-btn" on:click|stopPropagation={() => deletePath(index)} title="Delete">
-                <span class="material-icons">delete</span>
-              </button>
+              <div class="action-buttons">
+                <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => togglePinPath(index)}>
+                  <span class="material-icons">push_pin</span>
+                  <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
+                </button>
+                {#if pathStatus.isOpen}
+                  <button class="continue-btn" on:click|stopPropagation={() => continueJourney(pathStatus.tabId)}>
+                    <span class="material-icons">open_in_browser</span>
+                    <span class="tooltip">Switch to active tab</span>
+                  </button>
+                {/if}
+                <button class="delete-btn" on:click|stopPropagation={() => deletePath(index)}>
+                  <span class="material-icons">delete</span>
+                  <span class="tooltip">Delete this path</span>
+                </button>
+              </div>
             </div>
+            {/if}
           {/each}
         </div>
       </div>
@@ -856,7 +947,7 @@ Reply with ONLY the title, no explanation.`;
 
   .path-item {
     padding: 10px;
-    padding-right: 70px;
+    padding-bottom: 35px;
     background: var(--surface-light);
     border-radius: 4px;
     cursor: pointer;
@@ -888,7 +979,19 @@ Reply with ONLY the title, no explanation.`;
 
   .pin-icon {
     font-size: 14px;
-    color: #FFD700;
+    margin-right: 4px;
+  }
+
+  .status-indicator-top {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #4CAF50;
+    box-shadow: 0 0 4px rgba(76, 175, 80, 0.6);
+    z-index: 1;
   }
 
   .path-meta {
@@ -904,10 +1007,18 @@ Reply with ONLY the title, no explanation.`;
     font-size: 14px;
   }
 
-  .pin-btn,
-  .delete-btn {
+  .action-buttons {
     position: absolute;
-    top: 8px;
+    bottom: 8px;
+    right: 8px;
+    display: flex;
+    gap: 6px;
+  }
+
+  .pin-btn,
+  .continue-btn,
+  .delete-btn {
+    position: relative;
     background: #606060;
     color: white;
     border: none;
@@ -915,28 +1026,68 @@ Reply with ONLY the title, no explanation.`;
     width: 24px;
     height: 24px;
     cursor: pointer;
-    font-size: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: background 0.2s;
   }
 
-  .pin-btn {
-    right: 38px;
+  .pin-btn .material-icons,
+  .continue-btn .material-icons,
+  .delete-btn .material-icons {
+    font-size: 14px;
   }
 
   .pin-btn.pinned {
     background: #FFD700;
   }
 
+  .continue-btn {
+    background: #4CAF50;
+  }
+
+  .continue-btn:hover {
+    background: #66BB6A;
+  }
+
   .delete-btn {
-    right: 8px;
     background: #CC3333;
   }
 
   .delete-btn:hover {
     background: #FF4444;
+  }
+
+  .tooltip {
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 8px;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    font-size: 11px;
+    white-space: nowrap;
+    border-radius: 4px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 1000;
+  }
+
+  .tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    right: 8px;
+    border: 4px solid transparent;
+    border-top-color: rgba(0, 0, 0, 0.9);
+  }
+
+  .pin-btn:hover .tooltip,
+  .continue-btn:hover .tooltip,
+  .delete-btn:hover .tooltip {
+    opacity: 1;
   }
 
   .graph-container {

@@ -14,6 +14,12 @@
   let tooltip;
   let selectedNode = null;
 
+  function truncateText(text, maxLength = 60) {
+    if (!text) return '';
+    if (text.length <= maxLength) return text;
+    return text.substring(0, maxLength - 3) + '...';
+  }
+
   $: if (svgElement && nodes.length > 0) {
     renderGraph();
   }
@@ -181,22 +187,38 @@
         .on('drag', dragged)
         .on('end', dragEnded));
 
+    // Add background circle for contrast
     node.append('circle')
       .attr('r', d => d.radius)
-      .attr('fill', '#4A90E2')
-      .attr('stroke', '#7B68EE')
+      .attr('fill', '#2D2D2D')
+      .attr('stroke', '#4A90E2')
       .attr('stroke-width', 2)
+      .style('filter', 'drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.5))')
       .on('click', (event, d) => handleNodeClick(event, d))
       .on('mouseenter', (event, d) => handleNodeHover(event, d))
       .on('mouseleave', () => handleNodeLeave());
 
+    // Add favicon image
+    node.append('image')
+      .attr('xlink:href', d => `https://www.google.com/s2/favicons?domain=${d.domain}&sz=32`)
+      .attr('x', d => -d.radius * 0.6)
+      .attr('y', d => -d.radius * 0.6)
+      .attr('width', d => d.radius * 1.2)
+      .attr('height', d => d.radius * 1.2)
+      .style('pointer-events', 'none')
+      .on('error', function() {
+        // Fallback to a default icon if favicon fails to load
+        d3.select(this).attr('xlink:href', 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="%234A90E2"/></svg>');
+      });
+
     node.append('text')
-      .text(d => d.title || d.url)
+      .text(d => truncateText(d.title || d.url, 60))
       .attr('dy', d => -d.radius - 5)
       .style('font-size', '10px')
       .style('text-anchor', 'middle')
       .style('pointer-events', 'none')
-      .style('fill', '#E0E0E0');
+      .style('fill', '#E0E0E0')
+      .style('text-shadow', '0 1px 2px rgba(0, 0, 0, 0.8)');
 
     simulation.on('tick', () => {
       link
