@@ -1,3 +1,4 @@
+import '../styles/global.css';
 import Visualization from './Visualization.svelte';
 
 const app = new Visualization({

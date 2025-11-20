@@ -1,8 +1,12 @@
 <script>
   import { onMount } from 'svelte';
   import Graph from './Graph.svelte';
+  import Header from './components/Header.svelte';
+  import JourneyList from './components/JourneyList.svelte';
+  import DetailPanel from './components/DetailPanel.svelte';
+  import InfoModal from './components/InfoModal.svelte';
   import { dataManager } from '../lib/dataManager.js';
-  import { formatDate, formatRelativeTime, escapeHtml, getPrimaryDomain } from '../lib/utils.js';
+  import { getPrimaryDomain } from '../lib/utils.js';
 
   let nodes = [];
   let links = [];
@@ -19,9 +23,9 @@
   let pinnedPaths = new Set();
   let aiSession = null;
   let pathTitles = new Map();
-  let pathTitlesAnimating = new Map(); // Track which titles are currently animating
+  let pathTitlesAnimating = new Map();
   let closedTabs = {};
-  let activeTabs = new Map(); // Map of tabId -> tab info
+  let activeTabs = new Map();
   let showInfoModal = false;
   let infoData = null;
   
@@ -32,46 +36,10 @@
   let hideSinglePage = false;
   let filterPreferencesLoaded = false;
   
-  // Load saved filter preferences
-  async function loadFilterPreferences() {
-    try {
-      const result = await chrome.storage.local.get(['filterPreferences']);
-      if (result.filterPreferences) {
-        if (result.filterPreferences.hideSinglePage !== undefined) {
-          hideSinglePage = result.filterPreferences.hideSinglePage;
-        }
-      }
-      filterPreferencesLoaded = true;
-    } catch (error) {
-      console.error('Error loading filter preferences:', error);
-      filterPreferencesLoaded = true;
-    }
-  }
-  
-  // Save filter preferences
-  async function saveFilterPreferences() {
-    if (!filterPreferencesLoaded) return; // Don't save during initial load
-    
-    try {
-      await chrome.storage.local.set({
-        filterPreferences: {
-          hideSinglePage
-        }
-      });
-    } catch (error) {
-      console.error('Error saving filter preferences:', error);
-    }
-  }
-  
-  // Watch for changes to hideSinglePage and save
-  $: if (filterPreferencesLoaded && hideSinglePage !== undefined) {
-    saveFilterPreferences();
-  }
-  
   // Detail panel
   let showDetailPanel = false;
   let detailNode = null;
-  let detailPanelWidth = 350; // Default width
+  let detailPanelWidth = 350;
   let isResizingDetailPanel = false;
   
   // Dimensions
@@ -89,7 +57,6 @@
     await loadAndRenderGraph();
     updateStats();
     
-    // Listen for storage changes to auto-refresh
     const storageListener = (changes, areaName) => {
       if (areaName === 'local' && (changes.visits || changes.domains || changes.transitions)) {
         handleStorageChange();
@@ -97,22 +64,16 @@
     };
     chrome.storage.onChanged.addListener(storageListener);
     
-    // Listen for tab removal to update active tab indicators
     const tabRemovedListener = async (tabId) => {
-      // Reload active tabs to update status indicators
       await loadActiveTabs();
-      // Update isOpen property on all nodes
       updateNodeTabStatus();
-      // Trigger reactivity to update UI
       activeTabs = activeTabs;
       paths = paths;
       nodes = nodes;
     };
     chrome.tabs.onRemoved.addListener(tabRemovedListener);
     
-    // Listen for tab updates to catch when tabs are activated/deactivated
     const tabUpdatedListener = async (tabId, changeInfo, tab) => {
-      // Only update if URL changed (actual navigation, not just activation)
       if (changeInfo.url) {
         await loadActiveTabs();
         updateNodeTabStatus();
@@ -137,60 +98,30 @@
     };
   });
 
-  /**
-   * Handle storage changes - refresh the visualization
-   */
   async function handleStorageChange() {
-    // Invalidate cache to get fresh data
     dataManager.invalidateCache();
-    
-    // Reload active tabs to update status indicators
     await loadActiveTabs();
-    
-    // Reload and render the graph, preserving current path
     await loadAndRenderGraph(true);
-    
-    // Update stats
     updateStats();
   }
 
-  /**
-   * Initialize Chrome Built-in AI
-   */
   async function initAI() {
     try {
-      // Check if the AI API is available
-      if (!window.LanguageModel) {
-        return;
-      }
-
-      // Check availability
+      if (!window.LanguageModel) return;
       const availability = await LanguageModel.availability();
-      if (availability === 'unavailable') {
-        return;
-      }
-
-      // Get model parameters
+      if (availability === 'unavailable') return;
       const params = await LanguageModel.params();
-      
-      // Create AI session with slightly higher temperature for creative titles
       aiSession = await LanguageModel.create({
         temperature: Math.min(params.defaultTemperature * 1.2, params.maxTemperature),
         topK: params.defaultTopK
       });
-    } catch (error) {
-      // AI initialization failed, will fall back to domain names
-    }
+    } catch (error) {}
   }
 
-  /**
-   * Load saved path titles from Chrome storage
-   */
   async function loadPathTitles() {
     try {
       const result = await chrome.storage.local.get(['pathTitles']);
       if (result.pathTitles) {
-        // Convert stored object back to Map
         pathTitles = new Map(Object.entries(result.pathTitles));
       }
     } catch (error) {
@@ -198,12 +129,8 @@
     }
   }
 
-  /**
-   * Save path titles to Chrome storage
-   */
   async function savePathTitles() {
     try {
-      // Convert Map to object for storage
       const titlesObject = Object.fromEntries(pathTitles);
       await chrome.storage.local.set({ pathTitles: titlesObject });
     } catch (error) {
@@ -211,55 +138,40 @@
     }
   }
 
-  /**
-   * Animate title with typewriter effect
-   */
   async function animateTitle(pathKey, fullTitle) {
     const chars = fullTitle.split('');
     let currentText = '';
-    
-    // Mark as animating
     pathTitlesAnimating.set(pathKey, true);
     pathTitles.set(pathKey, '');
-    paths = paths; // Trigger reactivity
+    paths = paths;
     
-    // Animate character by character
     for (let i = 0; i < chars.length; i++) {
       currentText += chars[i];
       pathTitles.set(pathKey, currentText);
-      paths = paths; // Trigger reactivity
-      
-      // Wait between characters (faster for spaces, slower for letters)
+      paths = paths;
       const delay = chars[i] === ' ' ? 30 : 50;
       await new Promise(resolve => setTimeout(resolve, delay));
     }
     
-    // Mark animation as complete
     pathTitlesAnimating.delete(pathKey);
-    paths = paths; // Final reactivity trigger
+    paths = paths;
   }
 
-  /**
-   * Generate a descriptive title for a path using AI
-   */
   async function generatePathTitle(path) {
-    // Check if we already have a cached title
     const pathKey = path.nodes.map(n => n.url).join('|');
     if (pathTitles.has(pathKey)) {
       return pathTitles.get(pathKey);
     }
 
-    // Fallback to primary domain if AI is not available
     if (!aiSession) {
       return getPrimaryDomain(path);
     }
 
     try {
-      // Prepare context for AI
       const pageTitles = path.nodes
         .map(n => n.title || n.domain)
         .filter(t => t && t.trim())
-        .slice(0, 5); // Limit to first 5 pages
+        .slice(0, 5);
       
       const domains = [...new Set(path.nodes.map(n => n.domain))];
       
@@ -270,17 +182,13 @@ Domains: ${domains.join(', ')}
 Reply with ONLY the title, no explanation.`;
 
       const result = await aiSession.prompt(prompt);
-      const title = result.trim().replace(/^["']|["']$/g, ''); // Remove quotes if present
+      const title = result.trim().replace(/^["']|["']$/g, '');
       
-      // Animate the title with typewriter effect
       await animateTitle(pathKey, title);
-      
-      // Save to persistent storage
       await savePathTitles();
       
       return title;
     } catch (error) {
-      // AI title generation failed, fall back to domain
       return getPrimaryDomain(path);
     }
   }
@@ -316,7 +224,6 @@ Reply with ONLY the title, no explanation.`;
       const tabs = await chrome.tabs.query({});
       activeTabs = new Map();
       tabs.forEach(tab => {
-        // Store by both tab ID and URL for flexible lookup
         activeTabs.set(tab.id, {
           id: tab.id,
           url: tab.url,
@@ -330,17 +237,14 @@ Reply with ONLY the title, no explanation.`;
   }
 
   function updateNodeTabStatus() {
-    // Update isOpen property on all nodes based on current activeTabs
     const activeTabsArray = Array.from(activeTabs.values());
     
-    // Update nodes in the current view
     nodes.forEach(node => {
       const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
       node.isOpen = !!matchingTab;
       node.tabId = matchingTab?.id;
     });
     
-    // Update nodes in all paths
     paths.forEach(path => {
       path.nodes.forEach(node => {
         const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
@@ -349,7 +253,6 @@ Reply with ONLY the title, no explanation.`;
       });
     });
     
-    // Update allNodes
     allNodes.forEach(node => {
       const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
       node.isOpen = !!matchingTab;
@@ -358,8 +261,6 @@ Reply with ONLY the title, no explanation.`;
   }
 
   function getPathStatus(path) {
-    // Check if ANY page in this path is currently open in a tab
-    // We check by URL since tab IDs change when tabs are closed/reopened
     const activeTabsArray = Array.from(activeTabs.values());
     let activeCount = 0;
     let firstActiveTab = null;
@@ -384,7 +285,6 @@ Reply with ONLY the title, no explanation.`;
       };
     }
     
-    // No matching tabs found - path is closed
     return {
       isOpen: false,
       isClosed: true,
@@ -396,7 +296,6 @@ Reply with ONLY the title, no explanation.`;
 
   async function closeJourneyTabs(path) {
     try {
-      // Get all tab IDs that match URLs in this path
       const activeTabsArray = Array.from(activeTabs.values());
       const tabsToClose = [];
       
@@ -417,27 +316,53 @@ Reply with ONLY the title, no explanation.`;
         return;
       }
       
-      // Close all tabs
       await chrome.tabs.remove(tabsToClose);
-      
-      // Reload active tabs to update UI
       await loadActiveTabs();
-      
-      // Trigger reactivity to update path status indicators
       paths = paths;
     } catch (error) {
       console.error('Error closing journey tabs:', error);
       alert('Failed to close some tabs. They may have already been closed.');
-      // Reload active tabs to update status
       await loadActiveTabs();
     }
+  }
+
+  async function loadFilterPreferences() {
+    try {
+      const result = await chrome.storage.local.get(['filterPreferences']);
+      if (result.filterPreferences) {
+        if (result.filterPreferences.hideSinglePage !== undefined) {
+          hideSinglePage = result.filterPreferences.hideSinglePage;
+        }
+      }
+      filterPreferencesLoaded = true;
+    } catch (error) {
+      console.error('Error loading filter preferences:', error);
+      filterPreferencesLoaded = true;
+    }
+  }
+
+  async function saveFilterPreferences() {
+    if (!filterPreferencesLoaded) return;
+    
+    try {
+      await chrome.storage.local.set({
+        filterPreferences: {
+          hideSinglePage
+        }
+      });
+    } catch (error) {
+      console.error('Error saving filter preferences:', error);
+    }
+  }
+
+  $: if (filterPreferencesLoaded && hideSinglePage !== undefined) {
+    saveFilterPreferences();
   }
 
   async function loadAndRenderGraph(preserveCurrentPath = false) {
     loading = true;
     showEmpty = false;
     
-    // Save the current path index and identify the current path by its first node URL
     const savedPathIndex = currentPathIndex;
     let currentPathFirstUrl = null;
     if (preserveCurrentPath && currentPathIndex >= 0 && paths.length > currentPathIndex) {
@@ -451,7 +376,6 @@ Reply with ONLY the title, no explanation.`;
       const visits = await dataManager.getVisits(currentFilters);
 
       if (visits.length === 0) {
-        // Clear all data when there are no visits
         nodes = [];
         links = [];
         allNodes = [];
@@ -465,21 +389,16 @@ Reply with ONLY the title, no explanation.`;
 
       prepareGraphData(visits, preserveCurrentPath);
       
-      // Restore the current path if requested
       if (preserveCurrentPath && currentPathFirstUrl) {
-        // Find the path with the same first node URL
         const matchingPathIndex = paths.findIndex(path =>
           path.nodes.length > 0 && path.nodes[0].url === currentPathFirstUrl
         );
         
         if (matchingPathIndex >= 0) {
-          // Path still exists, switch to it
           await switchToPath(matchingPathIndex);
         } else if (savedPathIndex === -1) {
-          // Was showing all paths, keep showing all
           showAllPaths();
         } else if (paths.length > 0) {
-          // Path was deleted or changed, show the first path
           await switchToPath(0);
         }
       }
@@ -497,7 +416,6 @@ Reply with ONLY the title, no explanation.`;
     
     visits.forEach(visit => {
       if (!urlToNode.has(visit.url)) {
-        // Check if this URL is currently open in a tab
         const matchingTab = activeTabsArray.find(tab => tab.url === visit.url);
         
         urlToNode.set(visit.url, {
@@ -519,7 +437,6 @@ Reply with ONLY the title, no explanation.`;
         node.firstVisit = Math.min(node.firstVisit, visit.timestamp);
         node.radius = 15 + Math.log(node.visitCount) * 5;
         
-        // Update tab status
         const matchingTab = activeTabsArray.find(tab => tab.url === visit.url);
         node.isOpen = !!matchingTab;
         node.tabId = matchingTab?.id;
@@ -532,7 +449,6 @@ Reply with ONLY the title, no explanation.`;
     links = [];
     
     visits.forEach(visit => {
-      // Use fromUrl if available (new tracking), otherwise fall back to fromDomain (old data)
       if (visit.fromUrl) {
         const sourceUrl = visit.fromUrl;
         const targetUrl = visit.url;
@@ -549,7 +465,6 @@ Reply with ONLY the title, no explanation.`;
           }
         }
       } else if (visit.fromDomain) {
-        // Fallback for old data that only has fromDomain
         const sourceVisits = visits.filter(v =>
           v.domain === visit.fromDomain &&
           v.timestamp < visit.timestamp
@@ -578,27 +493,21 @@ Reply with ONLY the title, no explanation.`;
     allNodes = [...nodes];
     allLinks = [...links];
     
-    // Check if we should load from URL or use default
     if (paths.length > 0 && !preserveCurrentPath) {
       const params = new URLSearchParams(window.location.search);
       const journeyParam = params.get('journey');
       
       if (journeyParam !== null) {
-        // Load from URL parameter
         const journeyIndex = parseInt(journeyParam, 10);
         
         if (journeyIndex === -1) {
-          // Show all journeys
           showAllPaths();
         } else if (!isNaN(journeyIndex) && journeyIndex >= 0 && journeyIndex < paths.length) {
-          // Switch to specific journey (this will select it in menu and display it)
-          switchToPath(journeyIndex, true); // Skip URL update since it's already in URL
+          switchToPath(journeyIndex, true);
         } else {
-          // Invalid index, default to first journey (most recent)
           switchToPath(0);
         }
       } else {
-        // No URL parameter, default to first journey (most recent) and add to URL
         switchToPath(0);
       }
     }
@@ -665,15 +574,12 @@ Reply with ONLY the title, no explanation.`;
     nodes = path.nodes;
     links = path.links;
     
-    // Update URL with journey parameter (unless we're loading from URL)
     if (!skipURLUpdate) {
       updateURLWithJourney(index);
     }
     
-    // Generate AI title for this path (will use cache if already generated)
     if (aiSession && path.nodes.length > 0) {
       await generatePathTitle(path);
-      // Trigger reactivity to update the UI
       paths = paths;
     }
   }
@@ -682,14 +588,9 @@ Reply with ONLY the title, no explanation.`;
     nodes = allNodes;
     links = allLinks;
     currentPathIndex = -1;
-    
-    // Update URL to show all journeys
     updateURLWithJourney(-1);
   }
 
-  /**
-   * Update URL with current journey index
-   */
   function updateURLWithJourney(index) {
     const url = new URL(window.location.href);
     if (index === -1) {
@@ -699,7 +600,6 @@ Reply with ONLY the title, no explanation.`;
     }
     window.history.replaceState({}, '', url);
   }
-
 
   async function applyFilters() {
     currentFilters = {};
@@ -804,7 +704,7 @@ Reply with ONLY the title, no explanation.`;
     } else {
       pinnedPaths.add(index);
     }
-    pinnedPaths = pinnedPaths; // Trigger reactivity
+    pinnedPaths = pinnedPaths;
     localStorage.setItem('pinnedPaths', JSON.stringify([...pinnedPaths]));
   }
 
@@ -863,7 +763,6 @@ Reply with ONLY the title, no explanation.`;
         transitions: newTransitions
       });
       
-      // Remove the path title from storage
       const pathKey = path.nodes.map(n => n.url).join('|');
       if (pathTitles.has(pathKey)) {
         pathTitles.delete(pathKey);
@@ -898,28 +797,23 @@ Reply with ONLY the title, no explanation.`;
     if (!isResizingDetailPanel) return;
     
     const newWidth = window.innerWidth - e.clientX;
-    // Constrain between 300px and 800px
     detailPanelWidth = Math.max(300, Math.min(800, newWidth));
   }
 
   async function openOrNavigateToUrl(url) {
-    // Check if this URL is already open in a tab
     const activeTabsArray = Array.from(activeTabs.values());
     const matchingTab = activeTabsArray.find(tab => tab.url === url);
     
     if (matchingTab) {
-      // Tab exists, navigate to it
       try {
         await chrome.windows.update(matchingTab.windowId, { focused: true });
         await chrome.tabs.update(matchingTab.id, { active: true });
       } catch (error) {
         console.error('Error navigating to tab:', error);
-        // Tab might have been closed, create a new one
         chrome.tabs.create({ url });
         await loadActiveTabs();
       }
     } else {
-      // Tab doesn't exist, create a new one
       chrome.tabs.create({ url });
     }
   }
@@ -975,14 +869,11 @@ Reply with ONLY the title, no explanation.`;
           return;
         }
         
-        // Get current data
         const data = await dataManager.getAllData();
         const allVisits = data.visits || [];
         
-        // Convert journey nodes to visits
         const newVisits = [];
         journeyData.journey.nodes.forEach(node => {
-          // Check if this URL already exists
           const existingVisit = allVisits.find(v => v.url === node.url);
           if (!existingVisit) {
             newVisits.push({
@@ -996,7 +887,6 @@ Reply with ONLY the title, no explanation.`;
           }
         });
         
-        // Add links as additional visits with fromUrl
         journeyData.journey.links.forEach(link => {
           const sourceNode = journeyData.journey.nodes.find(n => n.url === link.source);
           const targetNode = journeyData.journey.nodes.find(n => n.url === link.target);
@@ -1006,7 +896,7 @@ Reply with ONLY the title, no explanation.`;
               url: targetNode.url,
               domain: targetNode.domain,
               title: targetNode.title,
-              timestamp: targetNode.firstVisit + 1, // Slightly after first visit
+              timestamp: targetNode.firstVisit + 1,
               fromDomain: sourceNode.domain,
               fromUrl: sourceNode.url
             });
@@ -1018,10 +908,8 @@ Reply with ONLY the title, no explanation.`;
           return;
         }
         
-        // Merge with existing visits
         const mergedVisits = [...allVisits, ...newVisits];
         
-        // Update domains
         const domains = data.domains || {};
         newVisits.forEach(visit => {
           if (!domains[visit.domain]) {
@@ -1041,7 +929,6 @@ Reply with ONLY the title, no explanation.`;
           }
         });
         
-        // Update transitions
         const transitions = data.transitions || {};
         newVisits.forEach(visit => {
           if (visit.fromDomain && visit.fromDomain !== visit.domain) {
@@ -1056,14 +943,12 @@ Reply with ONLY the title, no explanation.`;
           }
         });
         
-        // Save to storage
         await chrome.storage.local.set({
           visits: mergedVisits,
           domains: domains,
           transitions: transitions
         });
         
-        // Refresh the visualization
         dataManager.invalidateCache();
         await loadAndRenderGraph();
         updateStats();
@@ -1080,14 +965,9 @@ Reply with ONLY the title, no explanation.`;
 
   async function showInfo() {
     try {
-      // Get storage usage
       const storageData = await chrome.storage.local.get(null);
       const storageSize = new Blob([JSON.stringify(storageData)]).size;
-      
-      // Get statistics
       const stats = await dataManager.getStats();
-      
-      // Get version from manifest
       const manifest = chrome.runtime.getManifest();
       
       infoData = {
@@ -1108,147 +988,42 @@ Reply with ONLY the title, no explanation.`;
   function closeInfoModal() {
     showInfoModal = false;
   }
-
-  function formatBytes(bytes) {
-    if (bytes < 1024) return `${bytes} bytes`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
-  }
 </script>
 
 <div class="app-container">
-  <header class="header">
-    <div class="header-left">
-      <button on:click={toggleSideMenu} class="btn btn-secondary" title="Toggle Side Menu">
-        <span class="material-icons">menu</span>
-      </button>
-      <h1><span class="material-icons" style="vertical-align: middle;">map</span> Browser Journey</h1>
-      
-      <div class="header-filters">
-        <div class="filter-group">
-          <label for="startDate"><span class="material-icons">calendar_today</span></label>
-          <input type="date" id="startDate" bind:value={startDate} />
-        </div>
-
-        <div class="filter-group">
-          <label for="endDate">to</label>
-          <input type="date" id="endDate" bind:value={endDate} />
-        </div>
-
-        <div class="filter-group">
-          <input type="checkbox" id="hideSinglePage" bind:checked={hideSinglePage} />
-          <label for="hideSinglePage" style="cursor: pointer;">Hide single pages</label>
-        </div>
-
-        <button on:click={applyFilters} class="btn btn-primary btn-sm">Apply</button>
-        <button on:click={resetFilters} class="btn btn-secondary btn-sm">Reset</button>
-      </div>
-    </div>
-    
-    <div class="header-right">
-      <button on:click={refresh} class="btn btn-primary" title="Refresh Graph">
-        <span class="material-icons">refresh</span>
-      </button>
-      <button on:click={exportJSON} class="btn btn-secondary" title="Export as JSON">
-        <span class="material-icons">file_download</span>
-      </button>
-      <button on:click={clearHistory} class="btn btn-danger" title="Clear History">
-        <span class="material-icons">delete</span>
-      </button>
-      <button on:click={showInfo} class="btn btn-secondary" title="Information">
-        <span class="material-icons">info</span>
-      </button>
-    </div>
-  </header>
+  <Header
+    bind:startDate
+    bind:endDate
+    bind:hideSinglePage
+    {sideMenuCollapsed}
+    onToggleSideMenu={toggleSideMenu}
+    onApplyFilters={applyFilters}
+    onResetFilters={resetFilters}
+    onRefresh={refresh}
+    onExportJSON={exportJSON}
+    onClearHistory={clearHistory}
+    onShowInfo={showInfo}
+  />
 
   <div class="main-content">
     {#if !sideMenuCollapsed}
-      <div class="path-side-menu">
-        <button on:click={importJourney} class="import-journey-btn" title="Import a journey from JSON file">
-          <span class="material-icons">file_upload</span> Import Journey
-        </button>
-        
-        <button on:click={showAllPaths} class="show-all-btn" class:active={currentPathIndex === -1}>
-          <span class="material-icons">view_module</span> Show All Journeys
-        </button>
-
-        <div class="journey-search-container">
-          <span class="material-icons search-icon">search</span>
-          <input
-            type="text"
-            class="journey-search-input"
-            bind:value={journeySearchQuery}
-            placeholder="Search journeys..."
-          />
-        </div>
-
-        <div class="path-items">
-          {#each paths as path, index}
-            {@const isActive = index === currentPathIndex}
-            {@const isPinned = pinnedPaths.has(index)}
-            {@const pathStatus = getPathStatus(path)}
-            {@const pathKey = path.nodes.map(n => n.url).join('|')}
-            {@const aiTitle = pathTitles.get(pathKey)}
-            {@const isAnimating = pathTitlesAnimating.has(pathKey)}
-            {@const displayTitle = aiTitle || getPrimaryDomain(path)}
-            {@const isSinglePage = path.nodes.length === 1}
-            {@const matchesSearch = !journeySearchQuery ||
-              displayTitle.toLowerCase().includes(journeySearchQuery.toLowerCase()) ||
-              path.nodes.some(node =>
-                node.url.toLowerCase().includes(journeySearchQuery.toLowerCase()) ||
-                (node.title && node.title.toLowerCase().includes(journeySearchQuery.toLowerCase()))
-              )}
-            {#if (!hideSinglePage || !isSinglePage) && matchesSearch}
-            <div class="path-item-wrapper" class:pinned={isPinned}>
-              {#if pathStatus.isOpen}
-                <span class="status-indicator-top" title="Journey active ({pathStatus.activeCount} tab{pathStatus.activeCount > 1 ? 's' : ''} open)">
-                  {pathStatus.activeCount}
-                </span>
-              {/if}
-              <div
-                class="path-item"
-                class:active={isActive}
-                on:click={() => switchToPath(index)}
-                on:keydown={(e) => e.key === 'Enter' && switchToPath(index)}
-                role="button"
-                tabindex="0"
-              >
-                <div class="path-title">
-                  {#if isPinned}<span class="pin-icon">📌</span>{/if}
-                  {displayTitle}
-                </div>
-                <div class="path-meta">
-                  <span class="material-icons">description</span> {path.nodes.length} page{path.nodes.length > 1 ? 's' : ''}
-                </div>
-                <div class="path-meta">
-                  <span class="material-icons">schedule</span> {formatRelativeTime(path.nodes[0].firstVisit)}
-                </div>
-              </div>
-              <div class="action-buttons">
-                <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => togglePinPath(index)}>
-                  <span class="material-icons">push_pin</span>
-                  <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
-                </button>
-                <button class="share-btn" on:click|stopPropagation={() => exportJourney(index)}>
-                  <span class="material-icons">share</span>
-                  <span class="tooltip">Export this journey</span>
-                </button>
-                {#if pathStatus.isOpen}
-                  <button class="close-tabs-btn" on:click|stopPropagation={() => closeJourneyTabs(path)}>
-                    <span class="material-icons">close</span>
-                    <span class="tooltip">Close all tabs in this journey</span>
-                  </button>
-                {/if}
-                <button class="delete-btn" on:click|stopPropagation={() => deletePath(index)}>
-                  <span class="material-icons">delete</span>
-                  <span class="tooltip">Delete this path</span>
-                </button>
-              </div>
-            </div>
-            {/if}
-          {/each}
-        </div>
-      </div>
+      <JourneyList
+        {paths}
+        {currentPathIndex}
+        {pinnedPaths}
+        {pathTitles}
+        {pathTitlesAnimating}
+        {hideSinglePage}
+        bind:journeySearchQuery
+        onSwitchToPath={switchToPath}
+        onShowAllPaths={showAllPaths}
+        onTogglePinPath={togglePinPath}
+        onExportJourney={exportJourney}
+        onCloseJourneyTabs={closeJourneyTabs}
+        onDeletePath={deletePath}
+        onImportJourney={importJourney}
+        {getPathStatus}
+      />
     {/if}
 
     <div class="graph-container" class:menu-collapsed={sideMenuCollapsed}>
@@ -1268,46 +1043,14 @@ Reply with ONLY the title, no explanation.`;
       {/if}
     </div>
 
-    {#if showDetailPanel && detailNode}
-      <div class="detail-panel" style="width: {detailPanelWidth}px;">
-        <div class="resize-handle" on:mousedown={startResizingDetailPanel} on:keydown={(e) => {}} role="separator" aria-label="Resize detail panel" tabindex="0"></div>
-        <div class="panel-header">
-          <div class="panel-title">
-            <img src="https://www.google.com/s2/favicons?domain={detailNode.domain}&sz=32" alt="" class="domain-favicon" />
-            <h3>{detailNode.title || detailNode.url}</h3>
-          </div>
-          <button on:click={closeDetailPanel} class="close-btn">×</button>
-        </div>
-
-        <div class="panel-content">
-          <div class="stats-grid">
-            <div class="stat-card">
-              <div class="stat-label">Visits</div>
-              <div class="stat-value">{detailNode.visitCount}</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">First</div>
-              <div class="stat-value">{formatDate(detailNode.firstVisit).split(',')[0]}</div>
-            </div>
-            <div class="stat-card">
-              <div class="stat-label">Last</div>
-              <div class="stat-value">{formatDate(detailNode.lastVisit).split(',')[0]}</div>
-            </div>
-          </div>
-
-          <div class="visits-section">
-            <h4>Page Details</h4>
-            <div class="visit-item">
-              <div class="visit-title">{detailNode.title}</div>
-              <div class="visit-url">{detailNode.url}</div>
-              <div class="visit-meta">
-                <span class="visit-time">First: {formatRelativeTime(detailNode.firstVisit)} | Last: {formatRelativeTime(detailNode.lastVisit)}</span>
-                <button class="reopen-btn" on:click={() => openOrNavigateToUrl(detailNode.url)}>Open</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
+    {#if showDetailPanel}
+      <DetailPanel
+        {detailNode}
+        {detailPanelWidth}
+        onClose={closeDetailPanel}
+        onOpenUrl={openOrNavigateToUrl}
+        onStartResize={startResizingDetailPanel}
+      />
     {/if}
   </div>
 
@@ -1317,71 +1060,8 @@ Reply with ONLY the title, no explanation.`;
     </div>
   </footer>
 
-  {#if showInfoModal && infoData}
-    <div class="modal-overlay" on:click={closeInfoModal} on:keydown={(e) => e.key === 'Escape' && closeInfoModal()} role="button" tabindex="-1">
-      <div class="modal-content" on:click|stopPropagation on:keydown={(e) => {}} role="dialog" aria-modal="true" aria-labelledby="modal-title">
-        <div class="modal-header">
-          <h2 id="modal-title"><span class="material-icons" style="vertical-align: middle;">info</span> Browser Journey Info</h2>
-          <button on:click={closeInfoModal} class="modal-close-btn">×</button>
-        </div>
-        
-        <div class="modal-body">
-          <div class="info-section info-header-row">
-            <div class="info-header-item">
-              <h3>Version</h3>
-              <p class="info-value">v{infoData.version}</p>
-            </div>
-            <div class="info-header-item">
-              <h3>Storage Usage</h3>
-              <p class="info-value">{formatBytes(infoData.storageSizeBytes)}</p>
-              <p class="info-detail">{infoData.storageSizeKB} KB / {infoData.storageSizeMB} MB</p>
-            </div>
-          </div>
-
-          <div class="info-section">
-            <h3>Statistics</h3>
-            <table class="info-stats-table">
-              <tbody>
-                <tr>
-                  <td class="stat-label">Total Visits</td>
-                  <td class="stat-value">{infoData.totalVisits.toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td class="stat-label">Unique Domains</td>
-                  <td class="stat-value">{infoData.totalDomains.toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td class="stat-label">Transitions</td>
-                  <td class="stat-value">{infoData.totalTransitions.toLocaleString()}</td>
-                </tr>
-                <tr>
-                  <td class="stat-label">Today's Visits</td>
-                  <td class="stat-value">{infoData.todayVisits.toLocaleString()}</td>
-                </tr>
-                {#if infoData.mostVisited}
-                  <tr>
-                    <td class="stat-label">Most Visited</td>
-                    <td class="stat-value">{infoData.mostVisited} <span class="stat-detail">({infoData.mostVisitedCount} visits)</span></td>
-                  </tr>
-                {/if}
-                {#if infoData.firstVisit}
-                  <tr>
-                    <td class="stat-label">First Visit</td>
-                    <td class="stat-value">{formatDate(infoData.firstVisit).split(',')[0]}</td>
-                  </tr>
-                {/if}
-                {#if infoData.lastVisit}
-                  <tr>
-                    <td class="stat-label">Last Visit</td>
-                    <td class="stat-value">{formatDate(infoData.lastVisit).split(',')[0]}</td>
-                  </tr>
-                {/if}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      </div>
-    </div>
+  {#if showInfoModal}
+    <InfoModal {infoData} onClose={closeInfoModal} />
   {/if}
 </div>
 
@@ -1390,30 +1070,9 @@ Reply with ONLY the title, no explanation.`;
 </svelte:head>
 
 <style>
-  :global(*) {
+  :global(body) {
     margin: 0;
     padding: 0;
-    box-sizing: border-box;
-  }
-
-  :global(:root) {
-    --primary: #4A90E2;
-    --secondary: #7B68EE;
-    --background: #1E1E1E;
-    --surface: #2D2D2D;
-    --surface-light: #3D3D3D;
-    --text: #E0E0E0;
-    --text-dim: #A0A0A0;
-    --success: #4CAF50;
-    --warning: #FF9800;
-    --danger: #F44336;
-    --border: #404040;
-  }
-
-  :global(body) {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    background: var(--background);
-    color: var(--text);
     overflow: hidden;
   }
 
@@ -1423,382 +1082,11 @@ Reply with ONLY the title, no explanation.`;
     height: 100vh;
   }
 
-  .header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 15px 20px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
-    z-index: 100;
-    gap: 20px;
-  }
-
-  .header-left {
-    display: flex;
-    align-items: center;
-    gap: 30px;
-    flex: 1;
-  }
-
-  .header h1 {
-    font-size: 20px;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .header-filters {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    flex-wrap: wrap;
-  }
-
-  .header-right {
-    display: flex;
-    gap: 10px;
-    flex-shrink: 0;
-  }
-
-  .filter-group {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  .filter-group label {
-    font-size: 12px;
-    color: var(--text-dim);
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-  }
-
-  .filter-group input[type="date"] {
-    padding: 6px 10px;
-    background: var(--background);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-    font-size: 12px;
-    min-width: 120px;
-  }
-
-  .filter-group input[type="checkbox"] {
-    cursor: pointer;
-    width: 16px;
-    height: 16px;
-    accent-color: var(--primary);
-  }
-
-  .btn {
-    padding: 8px 16px;
-    border: none;
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-  }
-
-  .btn-sm {
-    padding: 6px 12px;
-    font-size: 12px;
-  }
-
-  .btn:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  }
-
-  .btn-primary {
-    background: var(--primary);
-    color: white;
-  }
-
-  .btn-secondary {
-    background: var(--surface-light);
-    color: var(--text);
-  }
-
-  .btn-danger {
-    background: var(--danger);
-    color: white;
-  }
-
   .main-content {
     display: flex;
     flex: 1;
     overflow: hidden;
     position: relative;
-  }
-
-  .path-side-menu {
-    width: 300px;
-    background: var(--surface);
-    border-right: 2px solid var(--border);
-    overflow-y: auto;
-    padding: 15px;
-    padding-top: 15px;
-  }
-
-  .journey-search-container {
-    position: relative;
-    margin-bottom: 10px;
-  }
-
-  .journey-search-container .search-icon {
-    position: absolute;
-    left: 10px;
-    top: 50%;
-    transform: translateY(-50%);
-    font-size: 18px;
-    color: var(--text-dim);
-    pointer-events: none;
-  }
-
-  .journey-search-input {
-    width: 100%;
-    padding: 8px 12px 8px 38px;
-    background: var(--background);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text);
-    font-size: 13px;
-    transition: border-color 0.2s;
-  }
-
-  .journey-search-input:focus {
-    outline: none;
-    border-color: var(--primary);
-  }
-
-  .journey-search-input::placeholder {
-    color: var(--text-dim);
-  }
-
-  .import-journey-btn {
-    width: 100%;
-    padding: 8px;
-    background: var(--primary);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    margin-bottom: 10px;
-    transition: all 0.2s ease;
-  }
-
-  .import-journey-btn:hover {
-    background: var(--secondary);
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
-  }
-
-  .show-all-btn {
-    width: 100%;
-    padding: 8px;
-    background: var(--surface-light);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-    margin-bottom: 15px;
-  }
-
-  .show-all-btn.active {
-    background: #007ACC;
-  }
-
-  .path-items {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .path-item-wrapper {
-    position: relative;
-  }
-
-  .path-item-wrapper.pinned {
-    order: -1;
-  }
-
-  .path-item {
-    padding: 10px;
-    padding-bottom: 35px;
-    background: var(--surface-light);
-    border-radius: 4px;
-    cursor: pointer;
-    transition: background 0.2s;
-    border: 2px solid transparent;
-  }
-
-  .path-item.active {
-    background: #007ACC;
-    border-color: #00A3FF;
-  }
-
-  .path-item:hover:not(.active) {
-    background: #505050;
-  }
-
-  .path-title {
-    font-weight: bold;
-    color: var(--text);
-    font-size: 13px;
-    margin-bottom: 4px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-  }
-
-  .pin-icon {
-    font-size: 14px;
-    margin-right: 4px;
-  }
-
-  .status-indicator-top {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    min-width: 18px;
-    height: 18px;
-    border-radius: 9px;
-    background: #4CAF50;
-    box-shadow: 0 0 4px rgba(76, 175, 80, 0.6);
-    z-index: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 10px;
-    font-weight: bold;
-    color: white;
-    padding: 0 4px;
-  }
-
-  .path-meta {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: 3px;
-    display: flex;
-    align-items: center;
-    gap: 3px;
-  }
-
-  .path-meta .material-icons {
-    font-size: 14px;
-  }
-
-  .action-buttons {
-    position: absolute;
-    bottom: 8px;
-    right: 8px;
-    display: flex;
-    gap: 6px;
-  }
-
-  .pin-btn,
-  .share-btn,
-  .close-tabs-btn,
-  .delete-btn {
-    position: relative;
-    background: #606060;
-    color: white;
-    border: none;
-    border-radius: 3px;
-    width: 24px;
-    height: 24px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: background 0.2s;
-  }
-
-  .pin-btn .material-icons,
-  .share-btn .material-icons,
-  .close-tabs-btn .material-icons,
-  .delete-btn .material-icons {
-    font-size: 14px;
-  }
-
-  .pin-btn.pinned {
-    background: #FFD700;
-  }
-
-  .share-btn {
-    background: #2196F3;
-  }
-
-  .share-btn:hover {
-    background: #42A5F5;
-  }
-
-  .close-tabs-btn {
-    background: #FF9800;
-  }
-
-  .close-tabs-btn:hover {
-    background: #FFB74D;
-  }
-
-  .delete-btn {
-    background: #CC3333;
-  }
-
-  .delete-btn:hover {
-    background: #FF4444;
-  }
-
-  .tooltip {
-    position: absolute;
-    bottom: 100%;
-    right: 0;
-    margin-bottom: 8px;
-    padding: 6px 10px;
-    background: rgba(0, 0, 0, 0.9);
-    color: white;
-    font-size: 11px;
-    white-space: nowrap;
-    border-radius: 4px;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity 0.2s;
-    z-index: 1000;
-  }
-
-  .tooltip::after {
-    content: '';
-    position: absolute;
-    top: 100%;
-    right: 8px;
-    border: 4px solid transparent;
-    border-top-color: rgba(0, 0, 0, 0.9);
-  }
-
-  .pin-btn:hover .tooltip,
-  .share-btn:hover .tooltip,
-  .close-tabs-btn:hover .tooltip,
-  .delete-btn:hover .tooltip {
-    opacity: 1;
   }
 
   .graph-container {
@@ -1849,179 +1137,6 @@ Reply with ONLY the title, no explanation.`;
     display: block;
   }
 
-  .detail-panel {
-    position: relative;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
-
-  .resize-handle {
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 4px;
-    cursor: ew-resize;
-    background: transparent;
-    z-index: 10;
-    transition: background 0.2s;
-  }
-
-  .resize-handle:hover {
-    background: var(--primary);
-  }
-
-  .panel-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 20px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .panel-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .domain-favicon {
-    width: 24px;
-    height: 24px;
-    border-radius: 4px;
-  }
-
-  .panel-header h3 {
-    font-size: 18px;
-    font-weight: 600;
-    word-break: break-all;
-  }
-
-  .close-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 28px;
-    cursor: pointer;
-    padding: 0;
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 4px;
-    transition: all 0.2s ease;
-  }
-
-  .close-btn:hover {
-    background: var(--surface-light);
-    color: var(--text);
-  }
-
-  .panel-content {
-    flex: 1;
-    overflow-y: auto;
-    padding: 20px;
-  }
-
-  .stats-grid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 10px;
-    margin-bottom: 20px;
-  }
-
-  .stat-card {
-    background: var(--background);
-    padding: 12px;
-    border-radius: 8px;
-    text-align: center;
-  }
-
-  .stat-label {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: 5px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .stat-value {
-    font-size: 18px;
-    font-weight: 600;
-    color: var(--primary);
-  }
-
-  .visits-section h4 {
-    font-size: 14px;
-    margin-bottom: 15px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .visit-item {
-    background: var(--background);
-    padding: 12px;
-    border-radius: 6px;
-    border-left: 3px solid var(--primary);
-    transition: all 0.2s ease;
-  }
-
-  .visit-item:hover {
-    background: var(--surface-light);
-    transform: translateX(5px);
-  }
-
-  .visit-title {
-    font-size: 13px;
-    font-weight: 500;
-    margin-bottom: 5px;
-    color: var(--text);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .visit-url {
-    font-size: 11px;
-    color: var(--text-dim);
-    margin-bottom: 8px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .visit-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 10px;
-  }
-
-  .visit-time {
-    font-size: 11px;
-    color: var(--text-dim);
-  }
-
-  .reopen-btn {
-    padding: 4px 10px;
-    background: var(--primary);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    font-size: 11px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-  }
-
-  .reopen-btn:hover {
-    background: var(--secondary);
-  }
-
   .footer {
     background: var(--surface);
     border-top: 1px solid var(--border);
@@ -2033,166 +1148,4 @@ Reply with ONLY the title, no explanation.`;
     color: var(--text-dim);
   }
 
-  ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  ::-webkit-scrollbar-track {
-    background: var(--background);
-  }
-
-  ::-webkit-scrollbar-thumb {
-    background: var(--surface-light);
-    border-radius: 4px;
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background: #4D4D4D;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-    backdrop-filter: blur(4px);
-  }
-
-  .modal-content {
-    background: var(--surface);
-    border-radius: 12px;
-    width: 90%;
-    max-width: 600px;
-    max-height: 80vh;
-    overflow: hidden;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-    border: 1px solid var(--border);
-  }
-
-  .modal-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 20px 24px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface-light);
-  }
-
-  .modal-header h2 {
-    font-size: 20px;
-    font-weight: 600;
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  .modal-close-btn {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-size: 32px;
-    cursor: pointer;
-    padding: 0;
-    width: 32px;
-    height: 32px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 4px;
-    transition: all 0.2s ease;
-  }
-
-  .modal-close-btn:hover {
-    background: var(--surface);
-    color: var(--text);
-  }
-
-  .modal-body {
-    padding: 24px;
-    overflow-y: auto;
-    max-height: calc(80vh - 80px);
-  }
-
-  .info-section {
-    margin-bottom: 24px;
-  }
-
-  .info-section:last-child {
-    margin-bottom: 0;
-  }
-
-  .info-header-row {
-    display: flex;
-    gap: 24px;
-    justify-content: space-between;
-  }
-
-  .info-header-item {
-    flex: 1;
-  }
-
-  .info-section h3 {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 12px;
-  }
-
-  .info-value {
-    font-size: 24px;
-    font-weight: 600;
-    color: var(--primary);
-    margin: 0;
-  }
-
-  .info-detail {
-    font-size: 12px;
-    color: var(--text-dim);
-    margin: 4px 0 0 0;
-  }
-
-  .info-stats-table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  .info-stats-table tbody tr {
-    border-bottom: 1px solid var(--border);
-  }
-
-  .info-stats-table tbody tr:last-child {
-    border-bottom: none;
-  }
-
-  .info-stats-table .stat-label {
-    padding: 12px 16px;
-    font-size: 13px;
-    color: var(--text-dim);
-    text-align: left;
-    font-weight: 500;
-  }
-
-  .info-stats-table .stat-value {
-    padding: 12px 16px;
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--primary);
-    text-align: right;
-  }
-
-  .info-stats-table .stat-detail {
-    font-size: 11px;
-    color: var(--text-dim);
-    font-weight: normal;
-  }
 </style>
