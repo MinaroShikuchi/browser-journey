@@ -59,44 +59,46 @@
             {pathStatus.activeCount}
           </span>
         {/if}
-        <div
-          class="path-item"
-          class:active={isActive}
-          on:click={() => onSwitchToPath(index)}
-          on:keydown={(e) => e.key === 'Enter' && onSwitchToPath(index)}
-          role="button"
-          tabindex="0"
-        >
-          <div class="path-title">
-            {#if isPinned}<span class="material-icons pin-icon">push_pin</span>{/if}
-            {displayTitle}
+        <div class="path-item-container">
+          <div
+            class="path-item"
+            class:active={isActive}
+            on:click={() => onSwitchToPath(index)}
+            on:keydown={(e) => e.key === 'Enter' && onSwitchToPath(index)}
+            role="button"
+            tabindex="0"
+          >
+            <div class="path-title">
+              {#if isPinned}<span class="material-icons pin-icon">push_pin</span>{/if}
+              {displayTitle}
+            </div>
+            <div class="path-meta">
+              <span class="material-icons">description</span> {path.nodes.length} page{path.nodes.length > 1 ? 's' : ''}
+            </div>
+            <div class="path-meta">
+              <span class="material-icons">schedule</span> {formatRelativeTime(path.nodes[0].firstVisit)}
+            </div>
           </div>
-          <div class="path-meta">
-            <span class="material-icons">description</span> {path.nodes.length} page{path.nodes.length > 1 ? 's' : ''}
-          </div>
-          <div class="path-meta">
-            <span class="material-icons">schedule</span> {formatRelativeTime(path.nodes[0].firstVisit)}
-          </div>
-        </div>
-        <div class="action-buttons">
-          <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => onTogglePinPath(index)}>
-            <span class="material-icons">push_pin</span>
-            <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
-          </button>
-          <button class="share-btn" on:click|stopPropagation={() => onExportJourney(index)}>
-            <span class="material-icons">share</span>
-            <span class="tooltip">Export this journey</span>
-          </button>
-          {#if pathStatus.isOpen}
-            <button class="close-tabs-btn" on:click|stopPropagation={() => onCloseJourneyTabs(path)}>
-              <span class="material-icons">close</span>
-              <span class="tooltip">Close all tabs in this journey</span>
+          <div class="action-buttons">
+            <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => onTogglePinPath(index)}>
+              <span class="material-icons">push_pin</span>
+              <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
             </button>
-          {/if}
-          <button class="delete-btn" on:click|stopPropagation={() => onDeletePath(index)}>
-            <span class="material-icons">delete</span>
-            <span class="tooltip">Delete this path</span>
-          </button>
+            <button class="share-btn" on:click|stopPropagation={() => onExportJourney(index)}>
+              <span class="material-icons">share</span>
+              <span class="tooltip">Export this journey</span>
+            </button>
+            {#if pathStatus.isOpen}
+              <button class="close-tabs-btn" on:click|stopPropagation={() => onCloseJourneyTabs(path)}>
+                <span class="material-icons">close</span>
+                <span class="tooltip">Close all tabs in this journey</span>
+              </button>
+            {/if}
+            <button class="delete-btn" on:click|stopPropagation={() => onDeletePath(index)}>
+              <span class="material-icons">delete</span>
+              <span class="tooltip">Delete this path</span>
+            </button>
+          </div>
         </div>
       </div>
       {/if}
@@ -205,18 +207,28 @@
     order: -1;
   }
 
-  .path-item {
-    padding: 10px 10px 35px;
+  .path-item-container {
+    position: relative;
     background: var(--surface-light);
     border-radius: var(--radius-sm);
+    border: 2px solid transparent;
+    padding: 0px 8px;
+  }
+
+  .path-item {
+    padding: 10px;
     cursor: pointer;
     transition: background var(--transition-fast);
-    border: 2px solid transparent;
+    border-radius: var(--radius-sm);
+  }
+
+  .path-item-container:has(.path-item.active) {
+    background: #007ACC;
+    border-color: #00A3FF;
   }
 
   .path-item.active {
-    background: #007ACC;
-    border-color: #00A3FF;
+    background: transparent;
   }
 
   .path-item:hover:not(.active) {
@@ -336,7 +348,7 @@
 
   .tooltip {
     position: absolute;
-    bottom: 100%;
+    bottom: calc(100% + 5px);
     left: 50%;
     transform: translateX(-50%);
     background: rgba(0, 0, 0, 0.9);
@@ -346,8 +358,7 @@
     font-size: 11px;
     white-space: nowrap;
     pointer-events: none;
-    margin-bottom: 5px;
-    z-index: 1000;
+    z-index: 10000;
     opacity: 0;
     transition: opacity var(--transition-fast);
   }

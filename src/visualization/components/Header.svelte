@@ -61,18 +61,18 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 15px var(--space-lg);
+    padding: 10px var(--space-md);
     background: var(--surface);
     border-bottom: 1px solid var(--border);
     box-shadow: var(--shadow-sm);
     z-index: 100;
-    gap: var(--space-lg);
+    gap: var(--space-md);
   }
 
   .header-left {
     display: flex;
     align-items: center;
-    gap: 30px;
+    gap: 20px;
     flex: 1;
   }
 
@@ -129,16 +129,20 @@
 
   /* Button styles */
   .btn {
-    padding: var(--space-sm) 16px;
+    padding: 6px 10px;
     border: none;
-    border-radius: var(--radius-md);
-    font-size: 13px;
+    border-radius: var(--radius-sm);
+    font-size: 12px;
     font-weight: 500;
     cursor: pointer;
     transition: all var(--transition-fast);
     display: inline-flex;
     align-items: center;
-    gap: 5px;
+    gap: 4px;
+  }
+
+  .btn .material-icons {
+    font-size: 18px;
   }
 
   .btn:hover {
@@ -147,8 +151,8 @@
   }
 
   .btn-sm {
-    padding: 6px var(--space-md);
-    font-size: 12px;
+    padding: 4px 8px;
+    font-size: 11px;
   }
 
   .btn-primary {

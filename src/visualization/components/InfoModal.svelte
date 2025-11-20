@@ -13,7 +13,7 @@
 
 {#if infoData}
 <div class="modal-overlay" on:click={onClose} on:keydown={(e) => e.key === 'Escape' && onClose()} role="button" tabindex="-1">
-  <div class="modal-content" on:click|stopPropagation on:keydown|stopPropagation role="dialog" aria-modal="true" aria-labelledby="modal-title">
+  <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-header">
       <h2 id="modal-title"><span class="material-icons" style="vertical-align: middle;">info</span> Browser Journey Info</h2>
       <button on:click={onClose} class="modal-close-btn">×</button>
