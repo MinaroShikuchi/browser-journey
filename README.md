@@ -2,7 +2,11 @@
 
 A Chrome extension that visualizes your browsing history as an interactive tree graph, helping you understand your web navigation patterns and browsing sessions.
 
+![Browser Journey Visualization](image.png)
+*Interactive tree visualization of your browsing history*
+
 ## Features
+
 
 ✨ **Interactive Tree Visualization**
 - Browsing paths displayed as vertical trees from top to bottom
