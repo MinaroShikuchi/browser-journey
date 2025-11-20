@@ -27,10 +27,49 @@
   let startDate = '';
   let endDate = '';
   let hideSinglePage = false;
+  let filterPreferencesLoaded = false;
+  
+  // Load saved filter preferences
+  async function loadFilterPreferences() {
+    try {
+      const result = await chrome.storage.local.get(['filterPreferences']);
+      if (result.filterPreferences) {
+        if (result.filterPreferences.hideSinglePage !== undefined) {
+          hideSinglePage = result.filterPreferences.hideSinglePage;
+        }
+      }
+      filterPreferencesLoaded = true;
+    } catch (error) {
+      console.error('Error loading filter preferences:', error);
+      filterPreferencesLoaded = true;
+    }
+  }
+  
+  // Save filter preferences
+  async function saveFilterPreferences() {
+    if (!filterPreferencesLoaded) return; // Don't save during initial load
+    
+    try {
+      await chrome.storage.local.set({
+        filterPreferences: {
+          hideSinglePage
+        }
+      });
+    } catch (error) {
+      console.error('Error saving filter preferences:', error);
+    }
+  }
+  
+  // Watch for changes to hideSinglePage and save
+  $: if (filterPreferencesLoaded && hideSinglePage !== undefined) {
+    saveFilterPreferences();
+  }
   
   // Detail panel
   let showDetailPanel = false;
   let detailNode = null;
+  let detailPanelWidth = 350; // Default width
+  let isResizingDetailPanel = false;
   
   // Dimensions
   let width = window.innerWidth - 250;
@@ -38,6 +77,7 @@
 
   onMount(async () => {
     setTodayDateFilter();
+    await loadFilterPreferences();
     loadPinnedPaths();
     await loadClosedTabs();
     await loadActiveTabs();
@@ -45,9 +85,70 @@
     await loadAndRenderGraph();
     updateStats();
     
+    // Listen for storage changes to auto-refresh
+    const storageListener = (changes, areaName) => {
+      if (areaName === 'local' && (changes.visits || changes.domains || changes.transitions)) {
+        handleStorageChange();
+      }
+    };
+    chrome.storage.onChanged.addListener(storageListener);
+    
+    // Listen for tab removal to update active tab indicators
+    const tabRemovedListener = async (tabId) => {
+      // Reload active tabs to update status indicators
+      await loadActiveTabs();
+      // Update isOpen property on all nodes
+      updateNodeTabStatus();
+      // Trigger reactivity to update UI
+      activeTabs = activeTabs;
+      paths = paths;
+      nodes = nodes;
+    };
+    chrome.tabs.onRemoved.addListener(tabRemovedListener);
+    
+    // Listen for tab updates to catch when tabs are activated/deactivated
+    const tabUpdatedListener = async (tabId, changeInfo, tab) => {
+      // Only update if URL changed (actual navigation, not just activation)
+      if (changeInfo.url) {
+        await loadActiveTabs();
+        updateNodeTabStatus();
+        activeTabs = activeTabs;
+        paths = paths;
+        nodes = nodes;
+      }
+    };
+    chrome.tabs.onUpdated.addListener(tabUpdatedListener);
+    
     window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
+    window.addEventListener('mousemove', resizeDetailPanel);
+    window.addEventListener('mouseup', stopResizingDetailPanel);
+    
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('mousemove', resizeDetailPanel);
+      window.removeEventListener('mouseup', stopResizingDetailPanel);
+      chrome.storage.onChanged.removeListener(storageListener);
+      chrome.tabs.onRemoved.removeListener(tabRemovedListener);
+      chrome.tabs.onUpdated.removeListener(tabUpdatedListener);
+    };
   });
+
+  /**
+   * Handle storage changes - refresh the visualization
+   */
+  async function handleStorageChange() {
+    // Invalidate cache to get fresh data
+    dataManager.invalidateCache();
+    
+    // Reload active tabs to update status indicators
+    await loadActiveTabs();
+    
+    // Reload and render the graph, preserving current path
+    await loadAndRenderGraph(true);
+    
+    // Update stats
+    updateStats();
+  }
 
   /**
    * Initialize Chrome Built-in AI
@@ -56,19 +157,13 @@
     try {
       // Check if the AI API is available
       if (!window.LanguageModel) {
-        console.warn('Chrome Built-in AI not available');
         return;
       }
 
       // Check availability
       const availability = await LanguageModel.availability();
       if (availability === 'unavailable') {
-        console.warn('AI model not available');
         return;
-      }
-
-      if (availability === 'after-download') {
-        console.log('AI model will be available after download');
       }
 
       // Get model parameters
@@ -79,10 +174,8 @@
         temperature: Math.min(params.defaultTemperature * 1.2, params.maxTemperature),
         topK: params.defaultTopK
       });
-      
-      console.log('Chrome Built-in AI initialized successfully');
     } catch (error) {
-      console.warn('Failed to initialize AI:', error);
+      // AI initialization failed, will fall back to domain names
     }
   }
 
@@ -124,7 +217,7 @@ Reply with ONLY the title, no explanation.`;
       
       return title;
     } catch (error) {
-      console.warn('AI title generation failed:', error);
+      // AI title generation failed, fall back to domain
       return getPrimaryDomain(path);
     }
   }
@@ -173,63 +266,161 @@ Reply with ONLY the title, no explanation.`;
     }
   }
 
+  function updateNodeTabStatus() {
+    // Update isOpen property on all nodes based on current activeTabs
+    const activeTabsArray = Array.from(activeTabs.values());
+    
+    // Update nodes in the current view
+    nodes.forEach(node => {
+      const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
+      node.isOpen = !!matchingTab;
+      node.tabId = matchingTab?.id;
+    });
+    
+    // Update nodes in all paths
+    paths.forEach(path => {
+      path.nodes.forEach(node => {
+        const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
+        node.isOpen = !!matchingTab;
+        node.tabId = matchingTab?.id;
+      });
+    });
+    
+    // Update allNodes
+    allNodes.forEach(node => {
+      const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
+      node.isOpen = !!matchingTab;
+      node.tabId = matchingTab?.id;
+    });
+  }
+
   function getPathStatus(path) {
     // Check if ANY page in this path is currently open in a tab
     // We check by URL since tab IDs change when tabs are closed/reopened
     const activeTabsArray = Array.from(activeTabs.values());
+    let activeCount = 0;
+    let firstActiveTab = null;
     
     for (const node of path.nodes) {
       const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
       if (matchingTab) {
-        return {
-          isOpen: true,
-          isClosed: false,
-          tabId: matchingTab.id,
-          activeTab: matchingTab
-        };
+        activeCount++;
+        if (!firstActiveTab) {
+          firstActiveTab = matchingTab;
+        }
       }
+    }
+    
+    if (activeCount > 0) {
+      return {
+        isOpen: true,
+        isClosed: false,
+        activeCount: activeCount,
+        tabId: firstActiveTab.id,
+        activeTab: firstActiveTab
+      };
     }
     
     // No matching tabs found - path is closed
     return {
       isOpen: false,
       isClosed: true,
+      activeCount: 0,
       tabId: null,
       activeTab: null
     };
   }
 
-  async function continueJourney(tabId) {
+  async function closeJourneyTabs(path) {
     try {
-      const tab = activeTabs.get(tabId);
-      if (tab) {
-        // Switch to the tab's window first
-        await chrome.windows.update(tab.windowId, { focused: true });
-        // Then activate the tab
-        await chrome.tabs.update(tabId, { active: true });
+      // Get all tab IDs that match URLs in this path
+      const activeTabsArray = Array.from(activeTabs.values());
+      const tabsToClose = [];
+      
+      for (const node of path.nodes) {
+        const matchingTab = activeTabsArray.find(tab => tab.url === node.url);
+        if (matchingTab) {
+          tabsToClose.push(matchingTab.id);
+        }
       }
+      
+      if (tabsToClose.length === 0) {
+        alert('No active tabs found for this journey.');
+        return;
+      }
+      
+      const confirmMessage = `Close ${tabsToClose.length} tab${tabsToClose.length > 1 ? 's' : ''} from this journey?`;
+      if (!confirm(confirmMessage)) {
+        return;
+      }
+      
+      // Close all tabs
+      await chrome.tabs.remove(tabsToClose);
+      
+      // Reload active tabs to update UI
+      await loadActiveTabs();
+      
+      // Trigger reactivity to update path status indicators
+      paths = paths;
     } catch (error) {
-      console.error('Error continuing journey:', error);
-      alert('Could not switch to tab. It may have been closed.');
+      console.error('Error closing journey tabs:', error);
+      alert('Failed to close some tabs. They may have already been closed.');
       // Reload active tabs to update status
       await loadActiveTabs();
     }
   }
 
-  async function loadAndRenderGraph() {
+  async function loadAndRenderGraph(preserveCurrentPath = false) {
     loading = true;
     showEmpty = false;
+    
+    // Save the current path index and identify the current path by its first node URL
+    const savedPathIndex = currentPathIndex;
+    let currentPathFirstUrl = null;
+    if (preserveCurrentPath && currentPathIndex >= 0 && paths.length > currentPathIndex) {
+      const currentPath = paths[currentPathIndex];
+      if (currentPath.nodes.length > 0) {
+        currentPathFirstUrl = currentPath.nodes[0].url;
+      }
+    }
     
     try {
       const visits = await dataManager.getVisits(currentFilters);
 
       if (visits.length === 0) {
+        // Clear all data when there are no visits
+        nodes = [];
+        links = [];
+        allNodes = [];
+        allLinks = [];
+        paths = [];
+        currentPathIndex = 0;
         showEmpty = true;
         loading = false;
         return;
       }
 
       prepareGraphData(visits);
+      
+      // Restore the current path if requested
+      if (preserveCurrentPath && currentPathFirstUrl) {
+        // Find the path with the same first node URL
+        const matchingPathIndex = paths.findIndex(path =>
+          path.nodes.length > 0 && path.nodes[0].url === currentPathFirstUrl
+        );
+        
+        if (matchingPathIndex >= 0) {
+          // Path still exists, switch to it
+          await switchToPath(matchingPathIndex);
+        } else if (savedPathIndex === -1) {
+          // Was showing all paths, keep showing all
+          showAllPaths();
+        } else if (paths.length > 0) {
+          // Path was deleted or changed, show the first path
+          await switchToPath(0);
+        }
+      }
+      
       loading = false;
     } catch (error) {
       console.error('Error loading graph:', error);
@@ -239,9 +430,13 @@ Reply with ONLY the title, no explanation.`;
 
   function prepareGraphData(visits) {
     const urlToNode = new Map();
+    const activeTabsArray = Array.from(activeTabs.values());
     
     visits.forEach(visit => {
       if (!urlToNode.has(visit.url)) {
+        // Check if this URL is currently open in a tab
+        const matchingTab = activeTabsArray.find(tab => tab.url === visit.url);
+        
         urlToNode.set(visit.url, {
           id: visit.url,
           url: visit.url,
@@ -250,7 +445,9 @@ Reply with ONLY the title, no explanation.`;
           firstVisit: visit.timestamp,
           lastVisit: visit.timestamp,
           visitCount: 1,
-          radius: 15
+          radius: 15,
+          isOpen: !!matchingTab,
+          tabId: matchingTab?.id
         });
       } else {
         const node = urlToNode.get(visit.url);
@@ -258,6 +455,11 @@ Reply with ONLY the title, no explanation.`;
         node.lastVisit = Math.max(node.lastVisit, visit.timestamp);
         node.firstVisit = Math.min(node.firstVisit, visit.timestamp);
         node.radius = 15 + Math.log(node.visitCount) * 5;
+        
+        // Update tab status
+        const matchingTab = activeTabsArray.find(tab => tab.url === visit.url);
+        node.isOpen = !!matchingTab;
+        node.tabId = matchingTab?.id;
       }
     });
 
@@ -267,11 +469,27 @@ Reply with ONLY the title, no explanation.`;
     links = [];
     
     visits.forEach(visit => {
-      if (visit.fromDomain) {
-        const sourceVisits = visits.filter(v => 
-          v.domain === visit.fromDomain && 
-          v.timestamp < visit.timestamp &&
-          v.tabId === visit.tabId
+      // Use fromUrl if available (new tracking), otherwise fall back to fromDomain (old data)
+      if (visit.fromUrl) {
+        const sourceUrl = visit.fromUrl;
+        const targetUrl = visit.url;
+        
+        if (sourceUrl !== targetUrl && urlToNode.has(sourceUrl)) {
+          const linkKey = `${sourceUrl}→${targetUrl}`;
+          if (!linkSet.has(linkKey)) {
+            linkSet.add(linkKey);
+            links.push({
+              source: sourceUrl,
+              target: targetUrl,
+              width: 2
+            });
+          }
+        }
+      } else if (visit.fromDomain) {
+        // Fallback for old data that only has fromDomain
+        const sourceVisits = visits.filter(v =>
+          v.domain === visit.fromDomain &&
+          v.timestamp < visit.timestamp
         ).sort((a, b) => b.timestamp - a.timestamp);
         
         if (sourceVisits.length > 0) {
@@ -558,8 +776,197 @@ Reply with ONLY the title, no explanation.`;
     height = window.innerHeight - 100;
   }
 
-  function reopenUrl(url) {
-    chrome.tabs.create({ url });
+  function startResizingDetailPanel(e) {
+    isResizingDetailPanel = true;
+    e.preventDefault();
+  }
+
+  function stopResizingDetailPanel() {
+    isResizingDetailPanel = false;
+  }
+
+  function resizeDetailPanel(e) {
+    if (!isResizingDetailPanel) return;
+    
+    const newWidth = window.innerWidth - e.clientX;
+    // Constrain between 300px and 800px
+    detailPanelWidth = Math.max(300, Math.min(800, newWidth));
+  }
+
+  async function openOrNavigateToUrl(url) {
+    // Check if this URL is already open in a tab
+    const activeTabsArray = Array.from(activeTabs.values());
+    const matchingTab = activeTabsArray.find(tab => tab.url === url);
+    
+    if (matchingTab) {
+      // Tab exists, navigate to it
+      try {
+        await chrome.windows.update(matchingTab.windowId, { focused: true });
+        await chrome.tabs.update(matchingTab.id, { active: true });
+      } catch (error) {
+        console.error('Error navigating to tab:', error);
+        // Tab might have been closed, create a new one
+        chrome.tabs.create({ url });
+        await loadActiveTabs();
+      }
+    } else {
+      // Tab doesn't exist, create a new one
+      chrome.tabs.create({ url });
+    }
+  }
+
+  async function exportJourney(pathIndex) {
+    if (pathIndex < 0 || pathIndex >= paths.length) return;
+    
+    const path = paths[pathIndex];
+    const journeyData = {
+      version: '1.0',
+      exportDate: new Date().toISOString(),
+      journey: {
+        nodes: path.nodes.map(node => ({
+          url: node.url,
+          domain: node.domain,
+          title: node.title,
+          firstVisit: node.firstVisit,
+          lastVisit: node.lastVisit,
+          visitCount: node.visitCount
+        })),
+        links: path.links.map(link => ({
+          source: typeof link.source === 'object' ? link.source.id : link.source,
+          target: typeof link.target === 'object' ? link.target.id : link.target
+        }))
+      }
+    };
+    
+    const blob = new Blob([JSON.stringify(journeyData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const primaryDomain = getPrimaryDomain(path);
+    a.download = `journey-${primaryDomain}-${new Date().toISOString().split('T')[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  async function importJourney() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json';
+    
+    input.onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      try {
+        const text = await file.text();
+        const journeyData = JSON.parse(text);
+        
+        if (!journeyData.version || !journeyData.journey) {
+          alert('Invalid journey file format');
+          return;
+        }
+        
+        // Get current data
+        const data = await dataManager.getAllData();
+        const allVisits = data.visits || [];
+        
+        // Convert journey nodes to visits
+        const newVisits = [];
+        journeyData.journey.nodes.forEach(node => {
+          // Check if this URL already exists
+          const existingVisit = allVisits.find(v => v.url === node.url);
+          if (!existingVisit) {
+            newVisits.push({
+              url: node.url,
+              domain: node.domain,
+              title: node.title,
+              timestamp: node.firstVisit,
+              fromDomain: null,
+              fromUrl: null
+            });
+          }
+        });
+        
+        // Add links as additional visits with fromUrl
+        journeyData.journey.links.forEach(link => {
+          const sourceNode = journeyData.journey.nodes.find(n => n.url === link.source);
+          const targetNode = journeyData.journey.nodes.find(n => n.url === link.target);
+          
+          if (sourceNode && targetNode) {
+            newVisits.push({
+              url: targetNode.url,
+              domain: targetNode.domain,
+              title: targetNode.title,
+              timestamp: targetNode.firstVisit + 1, // Slightly after first visit
+              fromDomain: sourceNode.domain,
+              fromUrl: sourceNode.url
+            });
+          }
+        });
+        
+        if (newVisits.length === 0) {
+          alert('All pages from this journey already exist in your history');
+          return;
+        }
+        
+        // Merge with existing visits
+        const mergedVisits = [...allVisits, ...newVisits];
+        
+        // Update domains
+        const domains = data.domains || {};
+        newVisits.forEach(visit => {
+          if (!domains[visit.domain]) {
+            domains[visit.domain] = {
+              visitCount: 0,
+              firstVisit: visit.timestamp,
+              lastVisit: visit.timestamp,
+              favicon: `https://www.google.com/s2/favicons?domain=${visit.domain}&sz=32`
+            };
+          }
+          domains[visit.domain].visitCount++;
+          if (visit.timestamp < domains[visit.domain].firstVisit) {
+            domains[visit.domain].firstVisit = visit.timestamp;
+          }
+          if (visit.timestamp > domains[visit.domain].lastVisit) {
+            domains[visit.domain].lastVisit = visit.timestamp;
+          }
+        });
+        
+        // Update transitions
+        const transitions = data.transitions || {};
+        newVisits.forEach(visit => {
+          if (visit.fromDomain && visit.fromDomain !== visit.domain) {
+            const key = `${visit.fromDomain}->${visit.domain}`;
+            if (!transitions[key]) {
+              transitions[key] = { count: 0, lastVisit: visit.timestamp };
+            }
+            transitions[key].count++;
+            if (visit.timestamp > transitions[key].lastVisit) {
+              transitions[key].lastVisit = visit.timestamp;
+            }
+          }
+        });
+        
+        // Save to storage
+        await chrome.storage.local.set({
+          visits: mergedVisits,
+          domains: domains,
+          transitions: transitions
+        });
+        
+        // Refresh the visualization
+        dataManager.invalidateCache();
+        await loadAndRenderGraph();
+        updateStats();
+        
+        alert(`Successfully imported journey with ${newVisits.length} new page(s)`);
+      } catch (error) {
+        console.error('Error importing journey:', error);
+        alert('Failed to import journey: ' + error.message);
+      }
+    };
+    
+    input.click();
   }
 </script>
 
@@ -613,10 +1020,12 @@ Reply with ONLY the title, no explanation.`;
   <div class="main-content">
     {#if !sideMenuCollapsed}
       <div class="path-side-menu">
-        <h3>Browsing Paths</h3>
+        <button on:click={importJourney} class="import-journey-btn" title="Import a journey from JSON file">
+          <span class="material-icons">file_upload</span> Import Journey
+        </button>
         
         <button on:click={showAllPaths} class="show-all-btn" class:active={currentPathIndex === -1}>
-          <span class="material-icons">view_module</span> Show All Paths
+          <span class="material-icons">view_module</span> Show All Journeys
         </button>
         
         <div class="path-items">
@@ -631,7 +1040,9 @@ Reply with ONLY the title, no explanation.`;
             {#if !hideSinglePage || !isSinglePage}
             <div class="path-item-wrapper" class:pinned={isPinned}>
               {#if pathStatus.isOpen}
-                <span class="status-indicator-top" title="Journey active (tab open)"></span>
+                <span class="status-indicator-top" title="Journey active ({pathStatus.activeCount} tab{pathStatus.activeCount > 1 ? 's' : ''} open)">
+                  {pathStatus.activeCount}
+                </span>
               {/if}
               <div
                 class="path-item"
@@ -657,10 +1068,14 @@ Reply with ONLY the title, no explanation.`;
                   <span class="material-icons">push_pin</span>
                   <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
                 </button>
+                <button class="share-btn" on:click|stopPropagation={() => exportJourney(index)}>
+                  <span class="material-icons">share</span>
+                  <span class="tooltip">Export this journey</span>
+                </button>
                 {#if pathStatus.isOpen}
-                  <button class="continue-btn" on:click|stopPropagation={() => continueJourney(pathStatus.tabId)}>
-                    <span class="material-icons">open_in_browser</span>
-                    <span class="tooltip">Switch to active tab</span>
+                  <button class="close-tabs-btn" on:click|stopPropagation={() => closeJourneyTabs(path)}>
+                    <span class="material-icons">close</span>
+                    <span class="tooltip">Close all tabs in this journey</span>
                   </button>
                 {/if}
                 <button class="delete-btn" on:click|stopPropagation={() => deletePath(index)}>
@@ -688,12 +1103,13 @@ Reply with ONLY the title, no explanation.`;
           <p>Start browsing to see your journey!</p>
         </div>
       {:else}
-        <Graph {nodes} {links} {width} {height} onNodeClick={handleNodeClick} />
+        <Graph {nodes} {links} {width} {height} {activeTabs} onNodeClick={handleNodeClick} />
       {/if}
     </div>
 
     {#if showDetailPanel && detailNode}
-      <div class="detail-panel">
+      <div class="detail-panel" style="width: {detailPanelWidth}px;">
+        <div class="resize-handle" on:mousedown={startResizingDetailPanel} role="separator" aria-label="Resize detail panel"></div>
         <div class="panel-header">
           <div class="panel-title">
             <img src="https://www.google.com/s2/favicons?domain={detailNode.domain}&sz=32" alt="" class="domain-favicon" />
@@ -725,7 +1141,7 @@ Reply with ONLY the title, no explanation.`;
               <div class="visit-url">{detailNode.url}</div>
               <div class="visit-meta">
                 <span class="visit-time">First: {formatRelativeTime(detailNode.firstVisit)} | Last: {formatRelativeTime(detailNode.lastVisit)}</span>
-                <button class="reopen-btn" on:click={() => reopenUrl(detailNode.url)}>Reopen</button>
+                <button class="reopen-btn" on:click={() => openOrNavigateToUrl(detailNode.url)}>Open</button>
               </div>
             </div>
           </div>
@@ -895,20 +1311,35 @@ Reply with ONLY the title, no explanation.`;
   }
 
   .path-side-menu {
-    width: 250px;
+    width: 300px;
     background: var(--surface);
     border-right: 2px solid var(--border);
     overflow-y: auto;
     padding: 15px;
+    padding-top: 20px;
   }
 
-  .path-side-menu h3 {
-    margin-top: 0;
-    color: var(--text);
-    font-size: 16px;
-    border-bottom: 1px solid var(--border);
-    padding-bottom: 10px;
-    margin-bottom: 15px;
+  .import-journey-btn {
+    width: 100%;
+    padding: 8px;
+    background: var(--primary);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    margin-bottom: 10px;
+    transition: all 0.2s ease;
+  }
+
+  .import-journey-btn:hover {
+    background: var(--secondary);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   }
 
   .show-all-btn {
@@ -986,12 +1417,19 @@ Reply with ONLY the title, no explanation.`;
     position: absolute;
     top: 8px;
     right: 8px;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
     background: #4CAF50;
     box-shadow: 0 0 4px rgba(76, 175, 80, 0.6);
     z-index: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 10px;
+    font-weight: bold;
+    color: white;
+    padding: 0 4px;
   }
 
   .path-meta {
@@ -1016,7 +1454,8 @@ Reply with ONLY the title, no explanation.`;
   }
 
   .pin-btn,
-  .continue-btn,
+  .share-btn,
+  .close-tabs-btn,
   .delete-btn {
     position: relative;
     background: #606060;
@@ -1033,7 +1472,8 @@ Reply with ONLY the title, no explanation.`;
   }
 
   .pin-btn .material-icons,
-  .continue-btn .material-icons,
+  .share-btn .material-icons,
+  .close-tabs-btn .material-icons,
   .delete-btn .material-icons {
     font-size: 14px;
   }
@@ -1042,12 +1482,20 @@ Reply with ONLY the title, no explanation.`;
     background: #FFD700;
   }
 
-  .continue-btn {
-    background: #4CAF50;
+  .share-btn {
+    background: #2196F3;
   }
 
-  .continue-btn:hover {
-    background: #66BB6A;
+  .share-btn:hover {
+    background: #42A5F5;
+  }
+
+  .close-tabs-btn {
+    background: #FF9800;
+  }
+
+  .close-tabs-btn:hover {
+    background: #FFB74D;
   }
 
   .delete-btn {
@@ -1085,7 +1533,8 @@ Reply with ONLY the title, no explanation.`;
   }
 
   .pin-btn:hover .tooltip,
-  .continue-btn:hover .tooltip,
+  .share-btn:hover .tooltip,
+  .close-tabs-btn:hover .tooltip,
   .delete-btn:hover .tooltip {
     opacity: 1;
   }
@@ -1139,12 +1588,28 @@ Reply with ONLY the title, no explanation.`;
   }
 
   .detail-panel {
-    width: 350px;
+    position: relative;
     background: var(--surface);
     border-left: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     overflow: hidden;
+  }
+
+  .resize-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: ew-resize;
+    background: transparent;
+    z-index: 10;
+    transition: background 0.2s;
+  }
+
+  .resize-handle:hover {
+    background: var(--primary);
   }
 
   .panel-header {

@@ -7,6 +7,7 @@
   export let links = [];
   export let width = 800;
   export let height = 600;
+  export let activeTabs = new Map();
   export let onNodeClick = () => {};
 
   let svgElement;
@@ -21,6 +22,11 @@
   }
 
   $: if (svgElement && nodes.length > 0) {
+    renderGraph();
+  }
+  
+  // Re-render when activeTabs changes (tab open/close events)
+  $: if (svgElement && activeTabs) {
     renderGraph();
   }
 
@@ -191,12 +197,45 @@
     node.append('circle')
       .attr('r', d => d.radius)
       .attr('fill', '#2D2D2D')
-      .attr('stroke', '#4A90E2')
-      .attr('stroke-width', 2)
-      .style('filter', 'drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.5))')
+      .attr('stroke', d => d.isOpen ? '#4CAF50' : '#4A90E2')
+      .attr('stroke-width', d => d.isOpen ? 3 : 2)
+      .style('filter', d => d.isOpen
+        ? 'drop-shadow(0px 0px 8px rgba(76, 175, 80, 0.8))'
+        : 'drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.5))')
       .on('click', (event, d) => handleNodeClick(event, d))
       .on('mouseenter', (event, d) => handleNodeHover(event, d))
       .on('mouseleave', () => handleNodeLeave());
+    
+    // Add a pulsing ring for open tabs
+    const pulseRings = node.filter(d => d.isOpen)
+      .append('circle')
+      .attr('class', 'pulse-ring')
+      .attr('r', d => d.radius)
+      .attr('fill', 'none')
+      .attr('stroke', '#4CAF50')
+      .attr('stroke-width', 2)
+      .attr('opacity', 0.8)
+      .style('pointer-events', 'none');
+    
+    // Animate the pulse rings with smooth transitions
+    function animatePulse() {
+      pulseRings
+        .transition()
+        .duration(2000)
+        .ease(d3.easeLinear)
+        .attr('r', d => d.radius + 12)
+        .attr('opacity', 0)
+        .on('end', function(d) {
+          d3.select(this)
+            .attr('r', d.radius)
+            .attr('opacity', 0.8);
+          animatePulse();
+        });
+    }
+    
+    if (pulseRings.size() > 0) {
+      animatePulse();
+    }
 
     // Add favicon image
     node.append('image')
@@ -238,7 +277,14 @@
   }
 
   function handleNodeHover(event, d) {
-    let tooltipContent = `<strong>${d.title || d.url}</strong><br/>`;
+    // Remove query parameters and hash from URL
+    const cleanUrl = d.url.split('?')[0].split('#')[0];
+    
+    let tooltipContent = `<strong>${d.title || d.domain}</strong><br/>`;
+    if (d.isOpen) {
+      tooltipContent += `<span style="font-size: 11px; color: #4CAF50;">● Tab is currently open</span><br/>`;
+    }
+    tooltipContent += `<span style="font-size: 10px; color: #A0A0A0; word-break: break-all;">${cleanUrl}</span><br/>`;
     tooltipContent += `<span style="font-size: 11px;">First visit: ${formatDate(d.firstVisit)}</span><br/>`;
     if (d.visitCount > 1) {
       tooltipContent += `<span style="font-size: 11px;">Last visit: ${formatDate(d.lastVisit)}</span><br/>`;
@@ -249,7 +295,8 @@
       .html(tooltipContent)
       .style('display', 'block')
       .style('left', `${event.pageX + 10}px`)
-      .style('top', `${event.pageY + 10}px`);
+      .style('top', `${event.pageY + 10}px`)
+      .style('max-width', '400px');
   }
 
   function handleNodeLeave() {

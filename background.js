@@ -1,8 +1,11 @@
 // Browser Journey - Background Service Worker
 // Tracks tab navigation and stores browsing data
 
-// Store for tracking the last visited domain per tab
+// Store for tracking the last visited URL per tab
 const tabHistory = new Map();
+
+// Store for tracking tab opener relationships (child tab -> parent URL that opened it)
+const tabOpeners = new Map();
 
 /**
  * Extract domain from URL
@@ -18,7 +21,6 @@ function extractDomain(url) {
     const urlObj = new URL(url);
     return urlObj.hostname;
   } catch (error) {
-    console.error('Error extracting domain:', error);
     return null;
   }
 }
@@ -42,7 +44,17 @@ async function trackNavigation(tabId, url, title) {
   if (!domain) return;
 
   const timestamp = Date.now();
-  const fromDomain = tabHistory.get(tabId) || null;
+  let fromUrl = tabHistory.get(tabId) || null;
+  let fromDomain = fromUrl ? extractDomain(fromUrl) : null;
+  
+  // If this is a new tab with no history, check if it was opened from another tab
+  if (!fromUrl && tabOpeners.has(tabId)) {
+    fromUrl = tabOpeners.get(tabId);
+    fromDomain = extractDomain(fromUrl);
+    
+    // Clear the opener relationship after first use
+    tabOpeners.delete(tabId);
+  }
 
   // Create visit record
   const visit = {
@@ -52,6 +64,7 @@ async function trackNavigation(tabId, url, title) {
     title: title || domain,
     timestamp: timestamp,
     fromDomain: fromDomain,
+    fromUrl: fromUrl,  // Store the actual source URL for accurate linking
     tabId: tabId
   };
 
@@ -97,12 +110,10 @@ async function trackNavigation(tabId, url, title) {
       domains: domains
     });
 
-    // Update tab history
-    tabHistory.set(tabId, domain);
-
-    console.log('Tracked navigation:', domain, 'from', fromDomain);
+    // Update tab history with the current URL for next navigation
+    tabHistory.set(tabId, url);
   } catch (error) {
-    console.error('Error tracking navigation:', error);
+    console.error('[Browser Journey] Error tracking navigation:', error);
   }
 }
 
@@ -165,10 +176,8 @@ async function cleanupOldData() {
       transitions: newTransitions,
       domains: newDomains
     });
-
-    console.log('Cleanup complete. Kept', recentVisits.length, 'visits from last 90 days');
   } catch (error) {
-    console.error('Error during cleanup:', error);
+    console.error('[Browser Journey] Error during cleanup:', error);
   }
 }
 
@@ -177,19 +186,11 @@ async function cleanupOldData() {
 // Listen for tab updates (page loads)
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'complete' && tab.url) {
-    trackNavigation(tabId, tab.url, tab.title);
-  }
-});
-
-// Listen for tab activation (switching tabs)
-chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  try {
-    const tab = await chrome.tabs.get(activeInfo.tabId);
-    if (tab.url && tab.status === 'complete') {
-      trackNavigation(activeInfo.tabId, tab.url, tab.title);
+    // Only track if the URL has actually changed (not just tab activation)
+    const lastUrl = tabHistory.get(tabId);
+    if (lastUrl !== tab.url) {
+      trackNavigation(tabId, tab.url, tab.title);
     }
-  } catch (error) {
-    console.error('Error handling tab activation:', error);
   }
 });
 
@@ -212,17 +213,32 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
       };
       
       await chrome.storage.local.set({ closedTabs });
-      console.log('Tab closed, journey ended:', tabId);
     }
     
-    // Cleanup tab history
+    // Cleanup tab history and opener tracking
     tabHistory.delete(tabId);
+    tabOpeners.delete(tabId);
   } catch (error) {
-    console.error('Error handling tab removal:', error);
+    console.error('[Browser Journey] Error handling tab removal:', error);
     tabHistory.delete(tabId);
+    tabOpeners.delete(tabId);
   }
 });
 
+// Listen for new tab creation from links
+chrome.webNavigation.onCreatedNavigationTarget.addListener(async (details) => {
+  // Track that the new tab was opened from a specific URL in the source tab
+  if (details.sourceTabId && details.tabId) {
+    try {
+      // Get the URL of the source tab at the time the link was clicked
+      const sourceTab = await chrome.tabs.get(details.sourceTabId);
+      if (sourceTab && sourceTab.url) {
+        tabOpeners.set(details.tabId, sourceTab.url);
+      }
+    } catch (error) {
+      // Source tab may have been closed
+    }
+  }
+});
 
-
-console.log('Browser Journey background service worker loaded');
+console.log('[Browser Journey] Background service worker loaded');
