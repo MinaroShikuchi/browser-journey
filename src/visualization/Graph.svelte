@@ -1,7 +1,25 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import * as d3 from 'd3';
+  // Import only the D3 modules we need for better tree-shaking
+  import { select } from 'd3-selection';
+  import { forceSimulation, forceLink, forceCollide, forceX, forceY } from 'd3-force';
+  import { zoom } from 'd3-zoom';
+  import { drag } from 'd3-drag';
+  import { easeLinear } from 'd3-ease';
   import { formatDate, formatRelativeTime } from '../lib/utils.js';
+  
+  // Create a minimal d3 object with only what we need
+  const d3 = {
+    select,
+    forceSimulation,
+    forceLink,
+    forceCollide,
+    forceX,
+    forceY,
+    zoom,
+    drag,
+    easeLinear
+  };
 
   export let nodes = [];
   export let links = [];

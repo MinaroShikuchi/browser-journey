@@ -80,23 +80,19 @@
             </div>
           </div>
           <div class="action-buttons">
-            <button class="pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => onTogglePinPath(index)}>
+            <button class="action-btn pin-btn" class:pinned={isPinned} on:click|stopPropagation={() => onTogglePinPath(index)} data-tooltip={isPinned ? 'Unpin' : 'Pin'}>
               <span class="material-icons">push_pin</span>
-              <span class="tooltip">{isPinned ? 'Unpin path' : 'Pin path to top'}</span>
             </button>
-            <button class="share-btn" on:click|stopPropagation={() => onExportJourney(index)}>
+            <button class="action-btn share-btn" on:click|stopPropagation={() => onExportJourney(index)} data-tooltip="Export">
               <span class="material-icons">share</span>
-              <span class="tooltip">Export this journey</span>
             </button>
             {#if pathStatus.isOpen}
-              <button class="close-tabs-btn" on:click|stopPropagation={() => onCloseJourneyTabs(path)}>
+              <button class="action-btn close-tabs-btn" on:click|stopPropagation={() => onCloseJourneyTabs(path)} data-tooltip="Close tabs">
                 <span class="material-icons">close</span>
-                <span class="tooltip">Close all tabs in this journey</span>
               </button>
             {/if}
-            <button class="delete-btn" on:click|stopPropagation={() => onDeletePath(index)}>
+            <button class="action-btn delete-btn" on:click|stopPropagation={() => onDeletePath(index)} data-tooltip="Delete">
               <span class="material-icons">delete</span>
-              <span class="tooltip">Delete this path</span>
             </button>
           </div>
         </div>
@@ -108,10 +104,11 @@
 
 <style>
   .path-side-menu {
-    width: 300px;
+    width: 320px;
     background: var(--surface);
     border-right: 2px solid var(--border);
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 15px;
   }
 
@@ -139,6 +136,7 @@
     color: var(--text);
     font-size: 13px;
     transition: border-color var(--transition-fast);
+    box-sizing: border-box;
   }
 
   .journey-search-input:focus {
@@ -213,6 +211,7 @@
     border-radius: var(--radius-sm);
     border: 2px solid transparent;
     padding: 0px 8px;
+    overflow: visible;
   }
 
   .path-item {
@@ -293,10 +292,7 @@
     gap: 6px;
   }
 
-  .pin-btn,
-  .share-btn,
-  .close-tabs-btn,
-  .delete-btn {
+  .action-btn {
     position: relative;
     background: #606060;
     color: white;
@@ -346,37 +342,27 @@
     background: var(--color-red-light);
   }
 
-  .tooltip {
-    position: absolute;
-    bottom: calc(100% + 5px);
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(0, 0, 0, 0.9);
-    color: white;
-    padding: 4px 8px;
-    border-radius: 4px;
-    font-size: 11px;
-    white-space: nowrap;
-    pointer-events: none;
-    z-index: 10000;
-    opacity: 0;
-    transition: opacity var(--transition-fast);
-  }
-
-  .tooltip::after {
-    content: '';
+  .action-btn::after {
+    content: attr(data-tooltip);
     position: absolute;
     top: 100%;
     left: 50%;
     transform: translateX(-50%);
-    border: 4px solid transparent;
-    border-top-color: rgba(0, 0, 0, 0.9);
+    margin-top: 8px;
+    padding: 4px 8px;
+    background: rgba(0, 0, 0, 0.9);
+    color: white;
+    font-size: 11px;
+    white-space: nowrap;
+    border-radius: 4px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 10000;
   }
 
-  .pin-btn:hover .tooltip,
-  .share-btn:hover .tooltip,
-  .close-tabs-btn:hover .tooltip,
-  .delete-btn:hover .tooltip {
+  .action-btn:hover::after {
     opacity: 1;
   }
+
 </style>
