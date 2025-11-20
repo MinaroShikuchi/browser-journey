@@ -19,13 +19,14 @@
   let pinnedPaths = new Set();
   let aiSession = null;
   let pathTitles = new Map();
+  let pathTitlesAnimating = new Map(); // Track which titles are currently animating
   let closedTabs = {};
   let activeTabs = new Map(); // Map of tabId -> tab info
   let showInfoModal = false;
   let infoData = null;
   
   // Filter values
-  let searchDomain = '';
+  let journeySearchQuery = '';
   let startDate = '';
   let endDate = '';
   let hideSinglePage = false;
@@ -83,6 +84,7 @@
     loadPinnedPaths();
     await loadClosedTabs();
     await loadActiveTabs();
+    await loadPathTitles();
     await initAI();
     await loadAndRenderGraph();
     updateStats();
@@ -182,6 +184,62 @@
   }
 
   /**
+   * Load saved path titles from Chrome storage
+   */
+  async function loadPathTitles() {
+    try {
+      const result = await chrome.storage.local.get(['pathTitles']);
+      if (result.pathTitles) {
+        // Convert stored object back to Map
+        pathTitles = new Map(Object.entries(result.pathTitles));
+      }
+    } catch (error) {
+      console.error('Error loading path titles:', error);
+    }
+  }
+
+  /**
+   * Save path titles to Chrome storage
+   */
+  async function savePathTitles() {
+    try {
+      // Convert Map to object for storage
+      const titlesObject = Object.fromEntries(pathTitles);
+      await chrome.storage.local.set({ pathTitles: titlesObject });
+    } catch (error) {
+      console.error('Error saving path titles:', error);
+    }
+  }
+
+  /**
+   * Animate title with typewriter effect
+   */
+  async function animateTitle(pathKey, fullTitle) {
+    const chars = fullTitle.split('');
+    let currentText = '';
+    
+    // Mark as animating
+    pathTitlesAnimating.set(pathKey, true);
+    pathTitles.set(pathKey, '');
+    paths = paths; // Trigger reactivity
+    
+    // Animate character by character
+    for (let i = 0; i < chars.length; i++) {
+      currentText += chars[i];
+      pathTitles.set(pathKey, currentText);
+      paths = paths; // Trigger reactivity
+      
+      // Wait between characters (faster for spaces, slower for letters)
+      const delay = chars[i] === ' ' ? 30 : 50;
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    
+    // Mark animation as complete
+    pathTitlesAnimating.delete(pathKey);
+    paths = paths; // Final reactivity trigger
+  }
+
+  /**
    * Generate a descriptive title for a path using AI
    */
   async function generatePathTitle(path) {
@@ -214,8 +272,11 @@ Reply with ONLY the title, no explanation.`;
       const result = await aiSession.prompt(prompt);
       const title = result.trim().replace(/^["']|["']$/g, ''); // Remove quotes if present
       
-      // Cache the result
-      pathTitles.set(pathKey, title);
+      // Animate the title with typewriter effect
+      await animateTitle(pathKey, title);
+      
+      // Save to persistent storage
+      await savePathTitles();
       
       return title;
     } catch (error) {
@@ -402,7 +463,7 @@ Reply with ONLY the title, no explanation.`;
         return;
       }
 
-      prepareGraphData(visits);
+      prepareGraphData(visits, preserveCurrentPath);
       
       // Restore the current path if requested
       if (preserveCurrentPath && currentPathFirstUrl) {
@@ -430,7 +491,7 @@ Reply with ONLY the title, no explanation.`;
     }
   }
 
-  function prepareGraphData(visits) {
+  function prepareGraphData(visits, preserveCurrentPath = false) {
     const urlToNode = new Map();
     const activeTabsArray = Array.from(activeTabs.values());
     
@@ -517,8 +578,29 @@ Reply with ONLY the title, no explanation.`;
     allNodes = [...nodes];
     allLinks = [...links];
     
-    if (paths.length > 0) {
-      switchToPath(0);
+    // Check if we should load from URL or use default
+    if (paths.length > 0 && !preserveCurrentPath) {
+      const params = new URLSearchParams(window.location.search);
+      const journeyParam = params.get('journey');
+      
+      if (journeyParam !== null) {
+        // Load from URL parameter
+        const journeyIndex = parseInt(journeyParam, 10);
+        
+        if (journeyIndex === -1) {
+          // Show all journeys
+          showAllPaths();
+        } else if (!isNaN(journeyIndex) && journeyIndex >= 0 && journeyIndex < paths.length) {
+          // Switch to specific journey (this will select it in menu and display it)
+          switchToPath(journeyIndex, true); // Skip URL update since it's already in URL
+        } else {
+          // Invalid index, default to first journey (most recent)
+          switchToPath(0);
+        }
+      } else {
+        // No URL parameter, default to first journey (most recent) and add to URL
+        switchToPath(0);
+      }
     }
   }
 
@@ -574,7 +656,7 @@ Reply with ONLY the title, no explanation.`;
     return pathList;
   }
 
-  async function switchToPath(index) {
+  async function switchToPath(index, skipURLUpdate = false) {
     if (index < 0 || index >= paths.length) return;
     
     currentPathIndex = index;
@@ -582,6 +664,11 @@ Reply with ONLY the title, no explanation.`;
     
     nodes = path.nodes;
     links = path.links;
+    
+    // Update URL with journey parameter (unless we're loading from URL)
+    if (!skipURLUpdate) {
+      updateURLWithJourney(index);
+    }
     
     // Generate AI title for this path (will use cache if already generated)
     if (aiSession && path.nodes.length > 0) {
@@ -595,7 +682,24 @@ Reply with ONLY the title, no explanation.`;
     nodes = allNodes;
     links = allLinks;
     currentPathIndex = -1;
+    
+    // Update URL to show all journeys
+    updateURLWithJourney(-1);
   }
+
+  /**
+   * Update URL with current journey index
+   */
+  function updateURLWithJourney(index) {
+    const url = new URL(window.location.href);
+    if (index === -1) {
+      url.searchParams.delete('journey');
+    } else {
+      url.searchParams.set('journey', index.toString());
+    }
+    window.history.replaceState({}, '', url);
+  }
+
 
   async function applyFilters() {
     currentFilters = {};
@@ -607,9 +711,6 @@ Reply with ONLY the title, no explanation.`;
       currentFilters.endDate = new Date(endDate);
       currentFilters.endDate.setHours(23, 59, 59, 999);
     }
-    if (searchDomain) {
-      currentFilters.search = searchDomain;
-    }
 
     await loadAndRenderGraph();
     updateStats();
@@ -619,7 +720,6 @@ Reply with ONLY the title, no explanation.`;
     const today = new Date().toISOString().split('T')[0];
     startDate = today;
     endDate = today;
-    searchDomain = '';
     hideSinglePage = false;
 
     currentFilters = {};
@@ -762,6 +862,13 @@ Reply with ONLY the title, no explanation.`;
         domains: newDomains,
         transitions: newTransitions
       });
+      
+      // Remove the path title from storage
+      const pathKey = path.nodes.map(n => n.url).join('|');
+      if (pathTitles.has(pathKey)) {
+        pathTitles.delete(pathKey);
+        await savePathTitles();
+      }
       
       dataManager.invalidateCache();
       closeDetailPanel();
@@ -1019,11 +1126,6 @@ Reply with ONLY the title, no explanation.`;
       
       <div class="header-filters">
         <div class="filter-group">
-          <label for="searchDomain"><span class="material-icons">search</span></label>
-          <input type="text" id="searchDomain" bind:value={searchDomain} placeholder="Search..." />
-        </div>
-
-        <div class="filter-group">
           <label for="startDate"><span class="material-icons">calendar_today</span></label>
           <input type="date" id="startDate" bind:value={startDate} />
         </div>
@@ -1044,8 +1146,8 @@ Reply with ONLY the title, no explanation.`;
     </div>
     
     <div class="header-right">
-      <button on:click={showInfo} class="btn btn-secondary" title="Information">
-        <span class="material-icons">info</span>
+      <button on:click={refresh} class="btn btn-primary" title="Refresh Graph">
+        <span class="material-icons">refresh</span>
       </button>
       <button on:click={exportJSON} class="btn btn-secondary" title="Export as JSON">
         <span class="material-icons">file_download</span>
@@ -1053,8 +1155,8 @@ Reply with ONLY the title, no explanation.`;
       <button on:click={clearHistory} class="btn btn-danger" title="Clear History">
         <span class="material-icons">delete</span>
       </button>
-      <button on:click={refresh} class="btn btn-primary" title="Refresh Graph">
-        <span class="material-icons">refresh</span>
+      <button on:click={showInfo} class="btn btn-secondary" title="Information">
+        <span class="material-icons">info</span>
       </button>
     </div>
   </header>
@@ -1069,7 +1171,17 @@ Reply with ONLY the title, no explanation.`;
         <button on:click={showAllPaths} class="show-all-btn" class:active={currentPathIndex === -1}>
           <span class="material-icons">view_module</span> Show All Journeys
         </button>
-        
+
+        <div class="journey-search-container">
+          <span class="material-icons search-icon">search</span>
+          <input
+            type="text"
+            class="journey-search-input"
+            bind:value={journeySearchQuery}
+            placeholder="Search journeys..."
+          />
+        </div>
+
         <div class="path-items">
           {#each paths as path, index}
             {@const isActive = index === currentPathIndex}
@@ -1077,9 +1189,16 @@ Reply with ONLY the title, no explanation.`;
             {@const pathStatus = getPathStatus(path)}
             {@const pathKey = path.nodes.map(n => n.url).join('|')}
             {@const aiTitle = pathTitles.get(pathKey)}
-            {@const displayTitle = (isActive && aiTitle) ? aiTitle : getPrimaryDomain(path)}
+            {@const isAnimating = pathTitlesAnimating.has(pathKey)}
+            {@const displayTitle = aiTitle || getPrimaryDomain(path)}
             {@const isSinglePage = path.nodes.length === 1}
-            {#if !hideSinglePage || !isSinglePage}
+            {@const matchesSearch = !journeySearchQuery ||
+              displayTitle.toLowerCase().includes(journeySearchQuery.toLowerCase()) ||
+              path.nodes.some(node =>
+                node.url.toLowerCase().includes(journeySearchQuery.toLowerCase()) ||
+                (node.title && node.title.toLowerCase().includes(journeySearchQuery.toLowerCase()))
+              )}
+            {#if (!hideSinglePage || !isSinglePage) && matchesSearch}
             <div class="path-item-wrapper" class:pinned={isPinned}>
               {#if pathStatus.isOpen}
                 <span class="status-indicator-top" title="Journey active ({pathStatus.activeCount} tab{pathStatus.activeCount > 1 ? 's' : ''} open)">
@@ -1207,15 +1326,16 @@ Reply with ONLY the title, no explanation.`;
         </div>
         
         <div class="modal-body">
-          <div class="info-section">
-            <h3>Version</h3>
-            <p class="info-value">v{infoData.version}</p>
-          </div>
-
-          <div class="info-section">
-            <h3>Storage Usage</h3>
-            <p class="info-value">{formatBytes(infoData.storageSizeBytes)}</p>
-            <p class="info-detail">{infoData.storageSizeKB} KB / {infoData.storageSizeMB} MB</p>
+          <div class="info-section info-header-row">
+            <div class="info-header-item">
+              <h3>Version</h3>
+              <p class="info-value">v{infoData.version}</p>
+            </div>
+            <div class="info-header-item">
+              <h3>Storage Usage</h3>
+              <p class="info-value">{formatBytes(infoData.storageSizeBytes)}</p>
+              <p class="info-detail">{infoData.storageSizeKB} KB / {infoData.storageSizeMB} MB</p>
+            </div>
           </div>
 
           <div class="info-section">
@@ -1355,7 +1475,6 @@ Reply with ONLY the title, no explanation.`;
     align-items: center;
   }
 
-  .filter-group input[type="text"],
   .filter-group input[type="date"] {
     padding: 6px 10px;
     background: var(--background);
@@ -1424,7 +1543,42 @@ Reply with ONLY the title, no explanation.`;
     border-right: 2px solid var(--border);
     overflow-y: auto;
     padding: 15px;
-    padding-top: 20px;
+    padding-top: 15px;
+  }
+
+  .journey-search-container {
+    position: relative;
+    margin-bottom: 10px;
+  }
+
+  .journey-search-container .search-icon {
+    position: absolute;
+    left: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 18px;
+    color: var(--text-dim);
+    pointer-events: none;
+  }
+
+  .journey-search-input {
+    width: 100%;
+    padding: 8px 12px 8px 38px;
+    background: var(--background);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text);
+    font-size: 13px;
+    transition: border-color 0.2s;
+  }
+
+  .journey-search-input:focus {
+    outline: none;
+    border-color: var(--primary);
+  }
+
+  .journey-search-input::placeholder {
+    color: var(--text-dim);
   }
 
   .import-journey-btn {
@@ -1973,6 +2127,16 @@ Reply with ONLY the title, no explanation.`;
 
   .info-section:last-child {
     margin-bottom: 0;
+  }
+
+  .info-header-row {
+    display: flex;
+    gap: 24px;
+    justify-content: space-between;
+  }
+
+  .info-header-item {
+    flex: 1;
   }
 
   .info-section h3 {
